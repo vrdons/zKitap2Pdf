@@ -1,7 +1,14 @@
 use crate::paths;
 use std::fs;
 use std::io;
+use std::path::Path;
 use serde::Serialize;
+
+pub fn setup() {
+    let _ = fs::create_dir_all(paths::INPUT_PATH);
+    let _ = fs::create_dir_all(paths::OUTPUT_PATH);
+    let _ = clear_temp();
+}
 
 #[derive(Serialize, Debug)]
 pub struct FsEntry {
@@ -26,5 +33,16 @@ fn scan_dir<P: AsRef<std::path::Path>>(path: P, out: &mut Vec<FsEntry>) -> io::R
             scan_dir(path_buf, out)?;
         }
     }
+    Ok(())
+}
+fn clear_temp() -> anyhow::Result<()> {
+    let tmp_dir = Path::new(paths::TEMP_PATH);
+
+    if tmp_dir.exists() {
+        fs::remove_dir_all(tmp_dir)?;
+    }
+
+    fs::create_dir_all(tmp_dir)?;
+
     Ok(())
 }
