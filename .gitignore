@@ -24,6 +24,7 @@ target
 # Personal files
 in
 out
+tmp
 
 # Added by cargo
 

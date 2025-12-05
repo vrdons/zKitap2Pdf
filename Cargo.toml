@@ -2,5 +2,9 @@
 name = "zkitaptopdf"
 version = "0.1.0"
 edition = "2024"
+include = ["src/**", "bin/**"]
 
 [dependencies]
+anyhow = "1.0.100"
+serde = { version = "1.0.228", features = ["derive", "std"] }
+tokio = { version = "1.48.0", features = ["full"] }
