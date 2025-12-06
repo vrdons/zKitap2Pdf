@@ -20,12 +20,16 @@ async fn main() -> anyhow::Result<()> {
         let temp_data = utils::wine::get_temp_path()?;
 
         let temp_clone = temp_data.clone();
-        let handle = std::thread::spawn(move || utils::filesystem::watch_folder(&temp_clone));
+        let temp_clone2 = temp_data.clone();
+        let handle_zip =
+            std::thread::spawn(move || utils::filesystem::watch_folder(&temp_clone, "zip"));
+        let handle_kxk =
+            std::thread::spawn(move || utils::filesystem::watch_folder(&temp_clone2, "kxk"));
 
         #[cfg(target_os = "linux")]
         let child = &mut utils::wine::run_file(&item)?;
         //TODO: exec for windows
-        let zip_path = handle
+        let zip_path = handle_zip
             .join()
             .map_err(|e| anyhow::anyhow!("Thread panic oldu: {:?}", e))??;
 
@@ -36,7 +40,12 @@ async fn main() -> anyhow::Result<()> {
         child
             .kill()
             .map_err(|e| anyhow::anyhow!("zKitap kapatılamadı: {}", e))?;
-
+        let kxk_path = handle_kxk
+            .join()
+            .map_err(|e| anyhow::anyhow!("Thread panic oldu: {:?}", e))??;
+        let file = fs::read(kxk_path)?;
+        let pass = "pub1isher1l0O";
+        utils::crypto::decrypt_publisher(file, pass);
         break;
         //panic!("{:?}", output);
     }

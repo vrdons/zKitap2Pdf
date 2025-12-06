@@ -20,18 +20,18 @@ pub fn check_input() -> anyhow::Result<Vec<String>> {
     Ok(items)
 }
 
-pub fn watch_folder(path: &PathBuf) -> anyhow::Result<PathBuf> {
+pub fn watch_folder(path: &PathBuf, exention: &str) -> anyhow::Result<PathBuf> {
     let (tx, rx) = channel();
     let mut watcher: RecommendedWatcher = Watcher::new(tx, notify::Config::default())?;
     watcher.watch(path, RecursiveMode::NonRecursive)?;
 
-    println!("Klasör izleniyor: {:?}", path);
+    println!("Klasör izleniyor: {:?}, ext: {}", path, exention);
 
     loop {
         let event = rx.recv()?.context("Event alınamadı")?;
         for path in event.paths {
             let ext = path.extension().unwrap_or(std::ffi::OsStr::new("unknown"));
-            if ext == std::ffi::OsStr::new("zip") {
+            if ext == std::ffi::OsStr::new(&exention) {
                 return Ok(path);
             }
         }
