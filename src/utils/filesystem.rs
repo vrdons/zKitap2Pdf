@@ -1,8 +1,13 @@
 use crate::paths;
-use std::fs;
-use std::io;
-use std::path::Path;
+use anyhow::{Context, Ok};
+use notify::RecommendedWatcher;
+use notify::RecursiveMode;
+use notify::Watcher;
 use serde::Serialize;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::mpsc::channel;
 
 pub fn setup() {
     let _ = fs::create_dir_all(paths::INPUT_PATH);
@@ -15,19 +20,39 @@ pub struct FsEntry {
     pub path: String,
 }
 
-pub fn check_input() -> io::Result<Vec<FsEntry>> {
+pub fn check_input() -> anyhow::Result<Vec<FsEntry>> {
     let mut items = Vec::new();
     scan_dir(paths::INPUT_PATH, &mut items)?;
     Ok(items)
 }
 
-fn scan_dir<P: AsRef<std::path::Path>>(path: P, out: &mut Vec<FsEntry>) -> io::Result<()> {
+pub fn watch_folder(path: &PathBuf) -> anyhow::Result<PathBuf> {
+    let (tx, rx) = channel();
+    let mut watcher: RecommendedWatcher = Watcher::new(tx, notify::Config::default())?;
+    watcher.watch(path, RecursiveMode::NonRecursive)?;
+
+    println!("Klasör izleniyor: {:?}", path);
+
+    loop {
+        let event = rx.recv()?.context("Event alınamadı")?;
+        for path in event.paths {
+            let ext = path.extension().unwrap_or(std::ffi::OsStr::new("unknown"));
+            if ext == std::ffi::OsStr::new("zip") {
+                return Ok(path);
+            }
+        }
+    }
+}
+
+fn scan_dir<P: AsRef<std::path::Path>>(path: P, out: &mut Vec<FsEntry>) -> anyhow::Result<()> {
     for entry in fs::read_dir(&path)? {
         let entry = entry?;
         let path_buf = entry.path();
         let path_str = path_buf.to_string_lossy().to_string();
 
-        out.push(FsEntry { path: path_str.clone() });
+        out.push(FsEntry {
+            path: path_str.clone(),
+        });
 
         if entry.metadata()?.is_dir() {
             scan_dir(path_buf, out)?;

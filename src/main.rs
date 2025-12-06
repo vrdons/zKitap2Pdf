@@ -24,11 +24,24 @@ async fn main() {
         #[cfg(target_os = "linux")]
         let TempData = utils::wine::get_temp_path().unwrap();
 
+        let TempClone = TempData.clone();
+        let handle = std::thread::spawn(move || utils::filesystem::watch_folder(&TempClone));
+
         #[cfg(target_os = "linux")]
         let child = &mut utils::wine::run_file(&item.path).unwrap();
         //TODO: exec for windows
-
-        let _ = child.wait();
+        match handle.join() {
+            Ok(result) => match result {
+                Ok(zip_path) => {
+                    println!("Thread’den gelen zip dosyası: {:?}", zip_path);
+                    child
+                        .kill()
+                        .unwrap_or_else(|e| println!("zKitap kapatılamadı: {}", e));
+                }
+                Err(e) => eprintln!("watch_folder hatası: {:?}", e),
+            },
+            Err(e) => eprintln!("Thread panic oldu: {:?}", e),
+        }
 
         break;
         //panic!("{:?}", output);

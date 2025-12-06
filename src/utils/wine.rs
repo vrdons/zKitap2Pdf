@@ -1,34 +1,42 @@
-use std::{env, fs, path::{Path, PathBuf}, process::{Child, Command}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::{Child, Command},
+};
 
-use anyhow::{Ok,Context};
+use anyhow::{Context, Ok};
 
 use crate::paths;
 
 pub fn setup_wine() -> anyhow::Result<()> {
     let _ = fs::create_dir_all(paths::WINE_PATH);
-    let wp = Path::new(paths::WINE_PATH).canonicalize()?.to_string_lossy().to_string();
+    let wp = Path::new(paths::WINE_PATH)
+        .canonicalize()?
+        .to_string_lossy()
+        .to_string();
     Command::new("wine")
         .arg("--version")
         .spawn()
         .unwrap_or_else(|e| panic!("Wine bulunamadı: {}", e));
     clear_temp()?;
-    let mut child = Command::new("wineboot")
-        .env("WINEPREFIX", wp)
-        .spawn()?;
+    let mut child = Command::new("wineboot").env("WINEPREFIX", wp).spawn()?;
 
     let status = child.wait()?;
 
     if status.success() {
-        println!("Winecfg başarıyla çalıştı.");
+        println!("Wineboot başarıyla çalıştı.");
     } else {
-        anyhow::bail!("Winecfg çalıştırılamadı! Çıkış kodu: {:?}", status.code());
+        anyhow::bail!("Wineboot çalıştırılamadı! Çıkış kodu: {:?}", status.code());
     }
 
     Ok(())
 }
 pub fn run_file(path: &str) -> anyhow::Result<Child> {
-    let wp = Path::new(paths::WINE_PATH).canonicalize()?.to_string_lossy().to_string();
-    println!("{}",wp);
+    let wp = Path::new(paths::WINE_PATH)
+        .canonicalize()?
+        .to_string_lossy()
+        .to_string();
+    println!("{}", wp);
     let child = Command::new("wine")
         .env("WINEPREFIX", wp)
         .arg(path)
