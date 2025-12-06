@@ -30,9 +30,14 @@ pub fn watch_folder(path: &PathBuf, exention: &str) -> anyhow::Result<PathBuf> {
     loop {
         let event = rx.recv()?.context("Event alınamadı")?;
         for path in event.paths {
+            if path.starts_with("sys1") && exention =="dll" {
+                println!("SYS1!!!");
+                return Ok(path);
+            } else {
             let ext = path.extension().unwrap_or(std::ffi::OsStr::new("unknown"));
             if ext == std::ffi::OsStr::new(&exention) {
                 return Ok(path);
+            }
             }
         }
     }

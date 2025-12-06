@@ -133,14 +133,9 @@ if __name__ == "__main__":
 
     json_text = kk.decrypt(encrypted_json_str, key)
     j = json.loads(json_text)
+    with open("tmp/sysm.dll", "r") as f:
+        sysd = f.read().strip()
 
-    fernus_code_decoded = kk.decrypt(j["fernusCode"], key)
-    print(fernus_code_decoded)
-    parts2 = fernus_code_decoded.split("x")
-    kk_object2 = {
-        'f1': int(parts2[0]) + len(j["pkxkname"]),
-        'f2': int(parts2[1]) + len(j["pkxkname"]),
-        'f3': int(parts2[2]) + len(j["pkxkname"])
-    }
-    print(j["fernusCode"], kk_object2, j["pkxkname"])
-    print("CK kontrol sonucu:", check_key(j["fernusCode"], kk_object2, j["pkxkname"]))
+    xml_decoded = kk.decrypt(sysd, key)
+    with open("test.xml", "wb") as f:
+        f.write(xml_decoded.encode("utf-8"))
