@@ -3,7 +3,6 @@ use anyhow::{Context, Ok};
 use notify::RecommendedWatcher;
 use notify::RecursiveMode;
 use notify::Watcher;
-use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -15,12 +14,7 @@ pub fn setup() {
     let _ = clear_temp();
 }
 
-#[derive(Serialize, Debug)]
-pub struct FsEntry {
-    pub path: String,
-}
-
-pub fn check_input() -> anyhow::Result<Vec<FsEntry>> {
+pub fn check_input() -> anyhow::Result<Vec<String>> {
     let mut items = Vec::new();
     scan_dir(paths::INPUT_PATH, &mut items)?;
     Ok(items)
@@ -44,15 +38,13 @@ pub fn watch_folder(path: &PathBuf) -> anyhow::Result<PathBuf> {
     }
 }
 
-fn scan_dir<P: AsRef<std::path::Path>>(path: P, out: &mut Vec<FsEntry>) -> anyhow::Result<()> {
+fn scan_dir<P: AsRef<std::path::Path>>(path: P, out: &mut Vec<String>) -> anyhow::Result<()> {
     for entry in fs::read_dir(&path)? {
         let entry = entry?;
         let path_buf = entry.path();
         let path_str = path_buf.to_string_lossy().to_string();
 
-        out.push(FsEntry {
-            path: path_str.clone(),
-        });
+        out.push(path_str.clone());
 
         if entry.metadata()?.is_dir() {
             scan_dir(path_buf, out)?;
