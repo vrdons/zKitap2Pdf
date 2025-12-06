@@ -37,15 +37,15 @@ async fn main() -> anyhow::Result<()> {
         thread::sleep(Duration::from_millis(100));
         utils::zip::extract_zip(zip_path, Path::new(paths::TEMP_PATH).join("temp")).await?;
 
-        child
-            .kill()
-            .map_err(|e| anyhow::anyhow!("zKitap kapatılamadı: {}", e))?;
         let kxk_path = handle_kxk
             .join()
             .map_err(|e| anyhow::anyhow!("Thread panic oldu: {:?}", e))??;
+        child
+            .kill()
+            .map_err(|e| anyhow::anyhow!("zKitap kapatılamadı: {}", e))?;
         let file = fs::read(kxk_path)?;
         let pass = "pub1isher1l0O";
-        utils::crypto::decrypt_publisher(file, pass);
+    //    utils::crypto::decrypt_publisher(file, pass);
         break;
         //panic!("{:?}", output);
     }
