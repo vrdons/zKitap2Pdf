@@ -36,6 +36,7 @@ fn scan_dir<P: AsRef<std::path::Path>>(path: P, out: &mut Vec<FsEntry>) -> io::R
     }
     Ok(())
 }
+
 fn clear_temp() -> anyhow::Result<()> {
     let tmp_dir = Path::new(paths::TEMP_PATH);
 

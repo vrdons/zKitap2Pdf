@@ -18,8 +18,6 @@ async fn main() {
         panic!("check_input: hiçbir dosya bulunamadı!");
     }
     for item in files {
-        let output = utils::upx::decompress(&item.path).await.unwrap();
-
         let username = env::var("USERNAME")
             .or_else(|_| env::var("USER"))
             .unwrap_or_else(|_| "unknown".to_string());
@@ -33,7 +31,7 @@ async fn main() {
             .join("Temp");
 
         #[cfg(target_os = "linux")]
-        let child = &mut utils::wine::run_file(&output).unwrap();
+        let child = &mut utils::wine::run_file(&item.path).unwrap();
         //TODO: exec for windows
 
         let _ = child.wait();
