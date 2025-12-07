@@ -6,10 +6,10 @@ include = ["src/**", "bin/**"]
 
 [dependencies]
 anyhow = "1.0.100"
-base64 = "0.22.1"
-blowfish = "0.9.1"
-byteorder = "1.5.0"
-cipher = "0.4.4"
 image = "0.25.9"
 notify = "8.2.0"
-swf = "0.2.2"
+swf = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="swf" }
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_core", features = ["deterministic", "default_font"] }
+ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_render_wgpu", features = ["clap"]}
+clap = "4.5.53"
+futures = "0.3.31"

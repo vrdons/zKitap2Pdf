@@ -8,9 +8,9 @@ use std::{
     time::Duration,
 };
 
+pub mod exporter;
 pub mod filesystem;
 pub mod paths;
-pub mod swf;
 pub mod utils;
 
 fn main() -> anyhow::Result<()> {
@@ -55,7 +55,7 @@ fn main() -> anyhow::Result<()> {
     }
     for dll in dlls {
         let mut read = File::open(dll)?;
-        swf::handle_swf(&mut read)?;
+        //   swf::handle_swf(&mut read)?;
     }
     /*
     break;
