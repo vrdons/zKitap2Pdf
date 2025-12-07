@@ -26,6 +26,7 @@ in
 out
 tmp
 wine
+*.kxk
 
 # Added by cargo
 
