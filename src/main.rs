@@ -8,14 +8,13 @@ use std::{
     time::Duration,
 };
 
-use crate::filesystem::setup_files;
-
 pub mod filesystem;
 pub mod paths;
+pub mod swf;
 pub mod utils;
 
 fn main() -> anyhow::Result<()> {
-    setup_files()?;
+    filesystem::setup_files()?;
     let input_path = Path::new(paths::INPUT_PATH);
     let temp_path = Path::new(paths::TEMP_PATH);
 
@@ -46,7 +45,8 @@ fn main() -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("temp klasörü boş"));
         }
         for dll in dlls {
-            //let mut read = File::open(dll)?;
+            let mut read = File::open(dll)?;
+            swf::handle_swf(&mut read)?;
         }
         break;
         //panic!("{:?}", output);
