@@ -1,7 +1,7 @@
 use crate::paths;
 use anyhow::Result;
-#[cfg(target_os = "linux")]
 use std::path::Path;
+use std::process::Stdio;
 use std::{
     env, fs,
     path::PathBuf,
@@ -21,6 +21,9 @@ pub fn setup_environment() -> Result<()> {
         Command::new("wine").arg("--version").spawn()?;
         let mut child = Command::new("wineboot")
             .env("WINEPREFIX", wine_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
             .spawn()?;
 
         child.wait()?;
@@ -60,8 +63,6 @@ pub fn get_roaming_path() -> anyhow::Result<PathBuf> {
 pub fn execute_exe(path: &PathBuf) -> anyhow::Result<Child> {
     #[cfg(target_os = "linux")]
     {
-        use std::process::Stdio;
-
         let wp = Path::new(crate::paths::WINE_PATH)
             .canonicalize()?
             .to_string_lossy()
