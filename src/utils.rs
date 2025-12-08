@@ -49,6 +49,20 @@ pub fn find_dlls(temp_path: &Path) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("temp klasörü boş veya dll yok");
     }
 
+    dlls.sort_by_key(|path| {
+        let stem = Path::new(path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let last_digit = stem
+            .chars()
+            .last()
+            .and_then(|c| c.to_digit(10))
+            .unwrap_or(999);
+        (last_digit, stem)
+    });
+
     Ok(dlls)
 }
 pub fn watch_and_copy(
