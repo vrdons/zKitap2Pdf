@@ -1,6 +1,6 @@
 use std::{
-    fs::File,
-    path::Path,
+    fs,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -11,7 +11,7 @@ use std::{
 use crate::{
     cli::Args,
     executable::{execute_exe, get_roaming_path, setup_environment},
-    utils::{clear_dir, find_dlls},
+    utils::{clear_dir, find_dlls, take_screenshot},
 };
 
 use anyhow::Result;
@@ -19,6 +19,7 @@ use clap::Parser;
 
 pub mod cli;
 pub mod executable;
+pub mod exporter;
 pub mod paths;
 pub mod utils;
 
@@ -28,8 +29,16 @@ fn main() -> Result<()> {
     let temp_dir = Path::new(paths::TEMP_DIR);
 
     //Environment setup
-    clear_dir(temp_dir)?;
+    clear_dir(&temp_dir.to_path_buf())?;
     setup_environment()?;
+    let exporter = exporter::Exporter::new(&exporter::Opt {
+        graphics: arg.graphics,
+        size: exporter::SizeOpt {
+            width: 1132,
+            height: 1614,
+            scale,
+        },
+    })?;
 
     let stop_watch = Arc::new(AtomicBool::new(false));
     let roaming = get_roaming_path()?;
@@ -48,7 +57,15 @@ fn main() -> Result<()> {
 
     let dlls = find_dlls(&temp_dir)?;
     for dll in dlls {
-        // let mut read = File::open(dll)?;
+        let mut read: Vec<u8> = fs::read(dll)?;
+        let output = temp_dir;
+        let frames = take_screenshot(&exporter, &mut read)?;
+        let digits = frames.len().to_string().len();
+        for (frame, image) in frames.iter().enumerate() {
+            let mut path: PathBuf = (&output).into();
+            path.push(format!("{frame:0digits$}.png"));
+            image.save(&path)?;
+        }
     }
     Ok(())
 }

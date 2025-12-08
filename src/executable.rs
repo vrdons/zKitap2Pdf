@@ -1,4 +1,4 @@
-use crate::paths;
+use crate::{paths, utils};
 use anyhow::Result;
 use std::path::Path;
 use std::process::Stdio;
@@ -9,6 +9,7 @@ use std::{
 };
 
 pub fn setup_environment() -> Result<()> {
+    utils::clear_dir(&get_temp_path()?)?;
     #[cfg(target_os = "linux")]
     {
         use std::path::Path;

@@ -1,6 +1,7 @@
+use image::RgbaImage;
 use std::{
     ffi::OsStr,
-    fs,
+    fs::{self},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -10,10 +11,12 @@ use std::{
 };
 use walkdir::WalkDir;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 
-pub fn clear_dir(dir: &Path) -> Result<()> {
+use crate::exporter::Exporter;
+
+pub fn clear_dir(dir: &PathBuf) -> Result<()> {
     if dir.exists() {
         fs::remove_dir_all(dir)?;
     }
@@ -87,7 +90,7 @@ pub fn watch_and_copy(
                             path.file_name()
                                 .ok_or_else(|| anyhow::anyhow!("Failed to get file name"))?,
                         );
-
+                        println!("copy: {:?}", path);
                         if let Err(e) = std::fs::copy(path.canonicalize()?, &out_path) {
                             println!("Failed to copy {:?} -> {:?}: {:?}", path, out_path, e);
                         }
@@ -98,4 +101,23 @@ pub fn watch_and_copy(
         }
     }
     Ok(())
+}
+
+pub fn take_screenshot(exporter: &Exporter, swf: &mut Vec<u8>) -> Result<Vec<RgbaImage>> {
+    let movie_export = exporter.start_exporting_movie(swf)?;
+
+    let mut result = Vec::new();
+    let totalframes = movie_export.total_frames();
+
+    for i in 0..totalframes {
+        movie_export.run_frame();
+
+        match movie_export.capture_frame() {
+            Ok(image) => result.push(image),
+            Err(e) => {
+                return Err(anyhow!("Unable to capture frame {} of: {:?}", i, e));
+            }
+        }
+    }
+    Ok(result)
 }

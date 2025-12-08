@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use ruffle_render_wgpu::clap::GraphicsBackend;
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -15,6 +16,9 @@ pub struct Args {
     /// Scale factor for the image (bigger = better quality)
     #[clap(short = 's', long, default_value_t = 20 ,value_parser = clap::value_parser!(u64).range(10..=30))]
     pub scale: u64,
+
+    #[clap(long, short, default_value = "gl")]
+    pub graphics: GraphicsBackend,
 }
 impl Args {
     pub fn validate(&self) -> anyhow::Result<(PathBuf, PathBuf, f64)> {

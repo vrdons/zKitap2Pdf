@@ -5,7 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
-clap = {version ="4.5.53", features = ["derive"] }
+clap = { version ="4.5.53", features = ["derive"] }
 image = { version = "0.25.9", features=["webp"] }
 notify = "8.2.0"
 walkdir = "2.5.0"
+swf = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="swf" }
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_core", features = ["deterministic", "default_font"] }
+ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_render_wgpu", features = ["clap"]}
+futures = "0.3.31"
