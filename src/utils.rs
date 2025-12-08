@@ -26,7 +26,13 @@ pub fn watch_and_copy(
     extension: &str,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
-    std::fs::create_dir_all(path)?;
+    if path.is_file() {
+        anyhow::bail!("watch path must be a DIRECTORY, but file given: {:?}", path);
+    }
+
+    if !path.exists() {
+        std::fs::create_dir_all(path)?;
+    }
 
     println!("Watching: {:?}", path.display());
 
