@@ -113,7 +113,10 @@ pub fn take_screenshot(exporter: &Exporter, swf: &mut Vec<u8>) -> Result<Vec<Rgb
         movie_export.run_frame();
 
         match movie_export.capture_frame() {
-            Ok(image) => result.push(image),
+            Ok(image) => {
+                println!("Capturing frame: {}", i);
+                result.push(image)
+            }
             Err(e) => {
                 return Err(anyhow!("Unable to capture frame {} of: {:?}", i, e));
             }

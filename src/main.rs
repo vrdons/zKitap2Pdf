@@ -34,8 +34,8 @@ fn main() -> Result<()> {
     let exporter = exporter::Exporter::new(&exporter::Opt {
         graphics: arg.graphics,
         size: exporter::SizeOpt {
-            width: 1132,
-            height: 1614,
+            width: 566,
+            height: 807,
             scale,
         },
     })?;
@@ -64,7 +64,7 @@ fn main() -> Result<()> {
         for (frame, image) in frames.iter().enumerate() {
             let mut path: PathBuf = (&output).into();
             path.push(format!("{frame:0digits$}.png"));
-            image.save(&path)?;
+            image.save(path)?;
         }
     }
     Ok(())

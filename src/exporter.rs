@@ -1,7 +1,5 @@
 use std::any::Any;
-use std::fs::File;
 use std::panic::catch_unwind;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -10,7 +8,6 @@ use ruffle_core::Player;
 use ruffle_core::PlayerBuilder;
 use ruffle_core::limits::ExecutionLimit;
 use ruffle_core::tag_utils::SwfMovie;
-use ruffle_core::tag_utils::movie_from_path;
 use ruffle_render_wgpu::backend::WgpuRenderBackend;
 use ruffle_render_wgpu::clap::GraphicsBackend;
 use ruffle_render_wgpu::descriptors::Descriptors;
