@@ -53,7 +53,6 @@ pub fn watch_and_copy(
                             path.file_name()
                                 .ok_or_else(|| anyhow::anyhow!("Failed to get file name"))?,
                         );
-                        println!("copy {:?} -> {:?}", path, out_path);
 
                         if let Err(e) = std::fs::copy(path.canonicalize()?, &out_path) {
                             println!("Failed to copy {:?} -> {:?}: {:?}", path, out_path, e);
