@@ -13,3 +13,4 @@ swf = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", pack
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_core", features = ["deterministic", "default_font"] }
 ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_render_wgpu", features = ["clap"]}
 futures = "0.3.31"
+oxidize-pdf = "1.6.5"

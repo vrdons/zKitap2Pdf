@@ -15,9 +15,10 @@ use crate::{
     utils::{clear_dir, find_dlls, take_screenshot},
 };
 
-use anyhow::Result;
 use clap::Parser;
-use swf::{Compression, Header, Rectangle, Twips, write::write_swf_raw_tags};
+use image::DynamicImage;
+use oxidize_pdf::{ColorSpace, Document, Image, Page};
+use swf::{Header, Rectangle, Twips, write::write_swf_raw_tags};
 
 pub mod cli;
 pub mod executable;
@@ -25,7 +26,7 @@ pub mod exporter;
 pub mod paths;
 pub mod utils;
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     let arg = Args::parse();
     let (input, output, scale) = arg.validate()?;
     let temp_dir = Path::new(paths::TEMP_DIR);
@@ -37,6 +38,9 @@ fn main() -> Result<()> {
             scale,
         },
     })?;
+    let mut doc = Document::new();
+    doc.set_title("My First PDF");
+    doc.set_author("Rust Developer");
     /*
         //Environment setup
         clear_dir(&temp_dir.to_path_buf())?;
@@ -58,6 +62,7 @@ fn main() -> Result<()> {
         stop_watch.store(true, Ordering::Relaxed);
     */
     let dlls = find_dlls(&temp_dir)?;
+    let mut i = 0;
     for dll in dlls {
         let file = File::open(dll)?;
 
@@ -78,13 +83,28 @@ fn main() -> Result<()> {
         write_swf_raw_tags(&header, &dec.data, &mut out)?;
 
         let frames = take_screenshot(&exporter, &mut out.into_inner())?;
-        let digits = frames.len().to_string().len();
-        for (frame, image) in frames.iter().enumerate() {
-            let output = temp_dir;
-            let mut path: PathBuf = (&output).into();
-            path.push(format!("{frame:0digits$}.png"));
-            image.save(path)?;
+        for (_frame, image) in frames.iter().enumerate() {
+            let width = image.width() as f64;
+            let height = image.height() as f64;
+            let dynamic = DynamicImage::ImageRgba8(image.clone());
+            let rgb_image = dynamic.to_rgb8();
+            let buffer = rgb_image.as_raw().clone();
+            let mut page = Page::new(width, height);
+            let pdf_image = Image::from_raw_data(
+                buffer,
+                width as u32,
+                height as u32,
+                ColorSpace::DeviceRGB,
+                8,
+            );
+
+            page.add_image("img", pdf_image);
+            page.draw_image("img", 0.0, 0.0, width, height)?;
+            doc.add_page(page);
+            println!("Added frame to pdf: {}", i);
+            i += 1;
         }
     }
+    doc.save(output.to_string_lossy().to_string())?;
     Ok(())
 }

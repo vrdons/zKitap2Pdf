@@ -1,4 +1,4 @@
-use image::RgbaImage;
+use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use std::{
     ffi::OsStr,
     fs::{self},
@@ -123,7 +123,7 @@ pub fn take_screenshot(exporter: &Exporter, swf: &mut Vec<u8>) -> Result<Vec<Rgb
     let mut result = Vec::new();
     let totalframes = movie_export.total_frames();
 
-    for i in 0..4 {
+    for i in 0..totalframes {
         movie_export.run_frame();
 
         match movie_export.capture_frame() {
