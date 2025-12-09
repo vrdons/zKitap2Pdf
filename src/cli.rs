@@ -17,7 +17,7 @@ pub struct Args {
     #[clap(short = 's', long, default_value_t = 20 ,value_parser = clap::value_parser!(u64).range(10..=30))]
     pub scale: u64,
 
-    #[clap(long, short, default_value = "gl")]
+    #[clap(long, short, default_value = "default")]
     pub graphics: GraphicsBackend,
 }
 impl Args {
