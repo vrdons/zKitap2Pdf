@@ -1,7 +1,7 @@
 use std::{
-    fs::{self, File},
-    io::{Cursor, Write},
-    path::{Path, PathBuf},
+    fs::File,
+    io::Cursor,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
