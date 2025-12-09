@@ -1,4 +1,4 @@
-use image::{ExtendedColorType, ImageEncoder, RgbaImage};
+use image::RgbaImage;
 use std::{
     ffi::OsStr,
     fs::{self},

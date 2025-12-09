@@ -41,26 +41,26 @@ fn main() -> anyhow::Result<()> {
     let mut doc = Document::new();
     doc.set_title("My First PDF");
     doc.set_author("Rust Developer");
-    /*
-        //Environment setup
-        clear_dir(&temp_dir.to_path_buf())?;
-        setup_environment()?;
 
-        let stop_watch = Arc::new(AtomicBool::new(false));
-        let roaming = get_roaming_path()?;
+    //Environment setup
+    clear_dir(&temp_dir.to_path_buf())?;
+    setup_environment()?;
 
-        let rc = roaming.clone();
-        let tmp = temp_dir.to_path_buf().clone();
-        let stp = stop_watch.clone();
-        let _watcher = std::thread::spawn(move || {
-            utils::watch_and_copy(&rc, &tmp, "dll", stp).unwrap_or_else(|e| println!("watch: {}", e))
-        });
-        execute_exe(&input)?.wait()?;
+    let stop_watch = Arc::new(AtomicBool::new(false));
+    let roaming = get_roaming_path()?;
 
-        //Sleeping for 5 seconds to allow the watcher to copy the files
-        std::thread::sleep(Duration::from_millis(5000));
-        stop_watch.store(true, Ordering::Relaxed);
-    */
+    let rc = roaming.clone();
+    let tmp = temp_dir.to_path_buf().clone();
+    let stp = stop_watch.clone();
+    let _watcher = std::thread::spawn(move || {
+        utils::watch_and_copy(&rc, &tmp, "dll", stp).unwrap_or_else(|e| println!("watch: {}", e))
+    });
+    execute_exe(&input)?.wait()?;
+
+    //Sleeping for 5 seconds to allow the watcher to copy the files
+    std::thread::sleep(Duration::from_millis(5000));
+    stop_watch.store(true, Ordering::Relaxed);
+
     let dlls = find_dlls(&temp_dir)?;
     let mut i = 0;
     for dll in dlls {
