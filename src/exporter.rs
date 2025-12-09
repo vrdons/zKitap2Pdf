@@ -29,12 +29,12 @@ pub struct SizeOpt {
 
 pub struct Opt {
     pub graphics: GraphicsBackend,
-    pub size: SizeOpt,
+    pub scale: f64,
 }
 
 pub struct Exporter {
     descriptors: Arc<Descriptors>,
-    size: SizeOpt,
+    scale: f64,
 }
 
 impl Exporter {
@@ -55,17 +55,17 @@ impl Exporter {
 
         Ok(Self {
             descriptors,
-            size: opt.size,
+            scale: opt.scale,
         })
     }
 
     pub fn start_exporting_movie(&self, file: &mut Vec<u8>) -> Result<MovieExport> {
         let movie = SwfMovie::from_data(file, "".to_string(), None)?;
-        let width = self.size.width as f64;
-        let width = (width * self.size.scale).round() as u32;
+        let width = movie.width().to_pixels();
+        let width = (width * self.scale).round() as u32;
 
-        let height = self.size.height as f64;
-        let height = (height * self.size.scale).round() as u32;
+        let height = movie.height().to_pixels();
+        let height = (height * self.scale).round() as u32;
 
         let target = TextureTarget::new(&self.descriptors.device, (width, height))
             .map_err(|e| anyhow!(e.to_string()))?;
@@ -75,7 +75,7 @@ impl Exporter {
                     .map_err(|e| anyhow!(e.to_string()))?,
             )
             .with_movie(movie)
-            .with_viewport_dimensions(width, height, self.size.scale)
+            .with_viewport_dimensions(width, height, self.scale)
             .build();
 
         Ok(MovieExport { player })

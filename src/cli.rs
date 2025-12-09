@@ -10,7 +10,7 @@ pub struct Args {
     pub input: PathBuf,
 
     /// Output file
-    #[arg(short, long, default_value = "output.pdf")]
+    #[arg(short, long)]
     pub output: Option<PathBuf>,
 
     /// Scale factor for the image (bigger = better quality)
@@ -20,6 +20,7 @@ pub struct Args {
     #[clap(long, short, default_value = "default")]
     pub graphics: GraphicsBackend,
 }
+
 impl Args {
     pub fn validate(&self) -> anyhow::Result<(PathBuf, PathBuf, f64)> {
         if self.input.extension().and_then(|e| e.to_str()) != Some("exe") {

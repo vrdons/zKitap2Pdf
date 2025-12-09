@@ -32,11 +32,7 @@ fn main() -> anyhow::Result<()> {
     let temp_dir = Path::new(paths::TEMP_DIR);
     let exporter = exporter::Exporter::new(&exporter::Opt {
         graphics: arg.graphics,
-        size: exporter::SizeOpt {
-            width: 566,
-            height: 807,
-            scale,
-        },
+        scale: scale,
     })?;
     let mut doc = Document::new();
     doc.set_title("My First PDF");
