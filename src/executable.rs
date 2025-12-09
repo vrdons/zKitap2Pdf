@@ -9,11 +9,9 @@ use std::{
 };
 
 pub fn setup_environment() -> Result<()> {
-    utils::clear_dir(&get_temp_path()?)?;
     #[cfg(target_os = "linux")]
     {
-        use std::path::Path;
-
+        utils::clear_dir(&get_temp_path()?)?;
         fs::create_dir_all(paths::WINE_PATH)?;
         let wine_path = Path::new(paths::WINE_PATH)
             .canonicalize()?

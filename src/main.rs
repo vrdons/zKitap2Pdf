@@ -16,8 +16,8 @@ use crate::{
 };
 
 use clap::Parser;
-use image::DynamicImage;
-use oxidize_pdf::{ColorSpace, Document, Image, Page};
+use image::{DynamicImage, ImageFormat};
+use oxidize_pdf::{Document, Image, Page};
 use swf::{Header, Rectangle, Twips, write::write_swf_raw_tags};
 
 pub mod cli;
@@ -82,17 +82,13 @@ fn main() -> anyhow::Result<()> {
         for (_frame, image) in frames.iter().enumerate() {
             let width = image.width() as f64;
             let height = image.height() as f64;
-            let dynamic = DynamicImage::ImageRgba8(image.clone());
-            let rgb_image = dynamic.to_rgb8();
-            let buffer = rgb_image.as_raw().clone();
             let mut page = Page::new(width, height);
-            let pdf_image = Image::from_raw_data(
-                buffer,
-                width as u32,
-                height as u32,
-                ColorSpace::DeviceRGB,
-                8,
-            );
+            let rgb_image = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
+
+            let mut jpeg_buf = Cursor::new(Vec::new());
+            rgb_image.write_to(&mut jpeg_buf, ImageFormat::Jpeg)?;
+
+            let pdf_image = Image::from_jpeg_data(jpeg_buf.into_inner())?;
 
             page.add_image("img", pdf_image);
             page.draw_image("img", 0.0, 0.0, width, height)?;
