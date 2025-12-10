@@ -58,22 +58,6 @@ pub fn get_roaming_path() -> anyhow::Result<PathBuf> {
 
     Ok(roaming)
 }
-pub fn get_inetcache() -> anyhow::Result<PathBuf> {
-    let username = env::var("USERNAME").or_else(|_| env::var("USER"))?;
-
-    #[cfg(target_os = "linux")]
-    let inetcache = Path::new(crate::paths::WINE_PATH)
-        .join("drive_c")
-        .join("users")
-        .join(username)
-        .join("AppData")
-        .join("Local")
-        .join("Microsoft")
-        .join("Windows")
-        .join("INetCache");
-
-    Ok(inetcache)
-}
 
 pub fn execute_exe(path: &PathBuf) -> anyhow::Result<Child> {
     #[cfg(target_os = "linux")]
