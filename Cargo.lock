@@ -4006,7 +4006,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zKitap2pdf"
+name = "zKitap2Pdf"
 version = "0.1.1"
 dependencies = [
  "anyhow",
