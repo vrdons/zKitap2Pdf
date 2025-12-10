@@ -22,19 +22,25 @@ pub fn setup_environment() -> Result<()> {
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| anyhow!("Wine not installed or not found in PATH"))?;
+            .status()
+            .map_err(|_| anyhow!("Wine not installed or not found in PATH"))?
+            .success()
+            .then_some(())
+            .ok_or_else(|| anyhow!("Wine not installed or not found in PATH"))?;
 
         let prefix = get_wineprefix();
         fs::create_dir_all(&prefix)?;
 
-        Command::new("wineboot")
+        let status = Command::new("wineboot")
             .env("WINEPREFIX", &prefix)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null())
-            .spawn()?
-            .wait()?;
+            .status()?;
+
+        if !status.success() {
+            return Err(anyhow!("wineboot failed with status {}", status));
+        }
     }
 
     Ok(())
@@ -56,11 +62,15 @@ pub fn get_roaming_path() -> Result<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        Ok(PathBuf::from("C:/")
-            .join("Users")
-            .join(username)
-            .join("AppData")
-            .join("Roaming"))
+        if let Ok(appdata) = env::var("APPDATA") {
+            Ok(PathBuf::from(appdata))
+        } else {
+            Ok(PathBuf::from("C:/")
+                .join("Users")
+                .join(username)
+                .join("AppData")
+                .join("Roaming"))
+        }
     }
 }
 

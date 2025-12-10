@@ -30,10 +30,13 @@ fn main() -> anyhow::Result<()> {
     let swf_files: utils::FileBuffer = Arc::new(Mutex::new(Vec::new()));
     let swf_files_thread = swf_files.clone();
 
-    let _t1 = std::thread::spawn(move || {
-        let roaming = get_roaming_path().unwrap();
-        utils::watch_file(&roaming, swf_files_thread)
-            .unwrap_or_else(|e| println!("watch rc: {}", e));
+    let _t1 = std::thread::spawn(move || match get_roaming_path() {
+        Ok(roaming) => {
+            if let Err(e) = utils::watch_file(&roaming, swf_files_thread) {
+                eprintln!("File watch error: {}", e);
+            }
+        }
+        Err(e) => eprintln!("Failed to get roaming path: {}", e),
     });
     for file in files {
         println!("Processing : {:?}", file.input);
@@ -82,13 +85,12 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("No SWF files found");
         }
         let mut sorted: Vec<_> = lock.clone();
+        drop(lock);
 
         utils::sort_files(&mut sorted);
         println!("Sorted files");
         for (name, data) in sorted {
             println!("Processing : {:?}", name);
-            let mut lock = swf_files.lock().unwrap();
-            lock.retain(|(n, _)| n != &name);
             let mut patched = patch_swf(&data)?;
             let frames = exporter.capture_frames(&mut patched)?;
             for image in frames.iter() {

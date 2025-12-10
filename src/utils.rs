@@ -68,7 +68,8 @@ pub fn watch_file(path: &PathBuf, buffer: FileBuffer) -> Result<()> {
                 };
                 let filename = filename_os.to_string_lossy().to_string();
 
-                if filename == "p" {
+                const IGNORED_FILE: &str = "p";
+                if filename == IGNORED_FILE {
                     continue;
                 }
 
