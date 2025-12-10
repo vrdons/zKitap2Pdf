@@ -64,12 +64,7 @@ pub fn find_files(path: &Path, extension: &str) -> anyhow::Result<Vec<String>> {
 
     Ok(dlls)
 }
-pub fn watch_and_copy(
-    path: &PathBuf,
-    out: &Path,
-    extension: &str,
-    stop: Arc<AtomicBool>,
-) -> Result<()> {
+pub fn watch_and_copy_swf(path: &PathBuf, out: &Path, stop: Arc<AtomicBool>) -> Result<()> {
     if path.is_file() {
         anyhow::bail!("watch path must be a DIRECTORY, but file given: {:?}", path);
     }
