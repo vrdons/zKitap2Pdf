@@ -124,7 +124,7 @@ pub fn patch_swf(file: &[u8]) -> Result<Vec<u8>> {
     Ok(out.into_inner())
 }
 
-pub fn sort_files(lock: &mut Vec<(String, Vec<u8>)>) {
+pub fn sort_files(lock: &mut [(String, Vec<u8>)]) {
     lock.sort_by_key(|(name, _data)| {
         let stem = Path::new(name)
             .file_stem()
