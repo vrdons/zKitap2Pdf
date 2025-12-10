@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{ffi::OsStr, path::PathBuf};
 
 use clap::Parser;
 use ruffle_render_wgpu::clap::GraphicsBackend;
@@ -26,6 +26,7 @@ pub struct Files {
     pub output: PathBuf,
     pub filename: String,
 }
+
 impl Args {
     pub fn validate(&self) -> anyhow::Result<(Vec<Files>, f64)> {
         let mut list = Vec::new();
@@ -34,25 +35,28 @@ impl Args {
             anyhow::bail!("Input does not exist: {:?}", self.input);
         }
 
-        let out_dir = self.output.clone().unwrap_or_else(|| PathBuf::from("out"));
+        let output = self.output.clone().unwrap_or_else(|| PathBuf::from("out"));
 
-        if !out_dir.exists() {
-            std::fs::create_dir_all(&out_dir)?;
-        }
-        if out_dir.is_file() {
-            anyhow::bail!("Output path must be a directory, not a file: {:?}", out_dir);
-        }
         if self.input.is_dir() {
             let files = crate::utils::find_files(self.input.clone().as_path(), "exe")?;
+
+            if output.is_file() {
+                anyhow::bail!("Output path must be a directory, not a file: {:?}", output);
+            }
+
+            if !output.exists() {
+                std::fs::create_dir_all(&output)?;
+            }
 
             if files.is_empty() {
                 anyhow::bail!("No .exe files found in input directory");
             }
+
             for file in files {
                 let input = std::fs::canonicalize(&file)?;
                 let filename = input.file_stem().unwrap().to_string_lossy().to_string();
 
-                let output = out_dir.join(format!("{}.pdf", filename));
+                let output = output.join(format!("{}.pdf", filename));
 
                 list.push(Files {
                     input,
@@ -71,10 +75,8 @@ impl Args {
             let input = std::fs::canonicalize(&self.input)?;
             let filename = input.file_stem().unwrap().to_string_lossy().to_string();
 
-            let output = out_dir.join(format!("{}.pdf", filename));
-
-            if output.exists() {
-                anyhow::bail!("Output file already exists: {:?}", output);
+            if output.extension().and_then(OsStr::to_str) != Some("pdf") {
+                anyhow::bail!("Output file must be a PDF: {:?}", output);
             }
 
             list.push(Files {
