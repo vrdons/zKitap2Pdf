@@ -17,7 +17,6 @@ use oxidize_pdf::{Document, Image, Page};
 pub mod cli;
 pub mod executable;
 pub mod exporter;
-pub mod paths;
 pub mod utils;
 
 fn main() -> anyhow::Result<()> {
