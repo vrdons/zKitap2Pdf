@@ -11,7 +11,6 @@ use std::{
 pub fn setup_environment() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        utils::clear_dir(&get_temp_path()?)?;
         fs::create_dir_all(paths::WINE_PATH)?;
         let wine_path = Path::new(paths::WINE_PATH)
             .canonicalize()?
@@ -28,21 +27,6 @@ pub fn setup_environment() -> Result<()> {
         child.wait()?;
     }
     Ok(())
-}
-
-pub fn get_temp_path() -> anyhow::Result<PathBuf> {
-    let username = env::var("USERNAME").or_else(|_| env::var("USER"))?;
-
-    #[cfg(target_os = "linux")]
-    let tmp = Path::new(crate::paths::WINE_PATH)
-        .join("drive_c")
-        .join("users")
-        .join(&username)
-        .join("AppData")
-        .join("Local")
-        .join("Temp");
-
-    Ok(tmp)
 }
 
 pub fn get_roaming_path() -> anyhow::Result<PathBuf> {
