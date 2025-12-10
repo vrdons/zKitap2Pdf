@@ -76,7 +76,11 @@ impl Args {
             }
 
             let input = std::fs::canonicalize(&self.input)?;
-            let filename = input.file_stem().unwrap().to_string_lossy().to_string();
+            let filename = input
+                .file_stem()
+                .ok_or_else(|| anyhow::anyhow!("Input file has no valid name: {:?}", input))?
+                .to_string_lossy()
+                .to_string();
             let output = self
                 .output
                 .clone()
