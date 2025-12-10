@@ -1,8 +1,12 @@
 use anyhow::{Result, anyhow};
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::{env, fs};
 
+#[cfg(target_os = "linux")]
+use std::fs;
+
+#[cfg(target_os = "linux")]
 fn get_wineprefix() -> PathBuf {
     if let Ok(env_prefix) = env::var("WINEPREFIX") {
         return PathBuf::from(env_prefix);
