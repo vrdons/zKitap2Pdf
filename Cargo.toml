@@ -18,7 +18,6 @@ exclude = [
     "*.log",
     "debug/",
     "*.pdf",
-    "temp/",
     "in/"
 ]
 

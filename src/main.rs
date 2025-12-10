@@ -3,7 +3,7 @@ use std::{
     io::Cursor,
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -12,13 +12,12 @@ use std::{
 use crate::{
     cli::Args,
     executable::{execute_exe, get_roaming_path, setup_environment},
-    utils::{clear_dir, find_files},
+    utils::{patch_swf, sort_files},
 };
 
 use clap::Parser;
-use image::{DynamicImage, ImageFormat};
+use image::{DynamicImage, ImageFormat, imageops};
 use oxidize_pdf::{Document, Image, Page};
-use swf::{Header, Rectangle, Twips, write::write_swf_raw_tags};
 
 pub mod cli;
 pub mod executable;
@@ -29,13 +28,19 @@ pub mod utils;
 fn main() -> anyhow::Result<()> {
     let arg = Args::parse();
     let (files, scale) = arg.validate()?;
-    let temp_dir = Path::new(paths::TEMP_DIR);
     let exporter = exporter::Exporter::new(&exporter::ExporterOpt {
         graphics: arg.graphics,
         scale,
     })?;
     setup_environment()?;
+    let swf_files: utils::FileBuffer = Arc::new(Mutex::new(Vec::new()));
+    let swf_files_thread = swf_files.clone();
 
+    let _t1 = std::thread::spawn(move || {
+        let roaming = get_roaming_path().unwrap();
+        utils::watch_file(&roaming, swf_files_thread)
+            .unwrap_or_else(|e| println!("watch rc: {}", e));
+    });
     for file in files {
         println!("Processing : {:?}", file.input);
         let input = file.input;
@@ -44,55 +49,60 @@ fn main() -> anyhow::Result<()> {
         doc.set_title(file.filename);
         doc.set_author("Rust Developer");
 
-        clear_dir(&temp_dir.to_path_buf())?;
-
-        let stop_watch = Arc::new(AtomicBool::new(false));
-        let roaming = get_roaming_path()?;
-
-        let rc = roaming.clone();
-        let tmp = temp_dir.to_path_buf().clone();
-        let stp = stop_watch.clone();
-
-        let _t1 = std::thread::spawn(move || {
-            utils::watch_and_copy_swf(&rc, &tmp, stp)
-                .unwrap_or_else(|e| println!("watch rc: {}", e));
-        });
-
         execute_exe(&input)?.wait()?;
 
-        //Sleeping for 5 seconds to allow the watcher to copy the files
-        // TODO: waiting for file size
-        std::thread::sleep(Duration::from_millis(15000));
-        stop_watch.store(true, Ordering::Relaxed);
+        println!("Process finished");
+        println!("Waiting for files to be copied...");
+        let deadline = std::time::Instant::now() + Duration::from_secs(25);
 
-        let dlls = find_files(temp_dir, "dll")?;
-        let mut i = 0;
-        for dll in dlls {
-            let file = File::open(dll)?;
+        loop {
+            {
+                let lock = swf_files.lock().unwrap();
 
-            let dec = swf::decompress_swf(file)?;
-            let header = Header {
-                version: dec.header.version(),
-                compression: dec.header.compression(),
-                stage_size: Rectangle {
-                    x_min: Twips::ZERO,
-                    x_max: Twips::from_pixels(566.0),
-                    y_min: Twips::ZERO,
-                    y_max: Twips::from_pixels(807.0),
-                },
-                frame_rate: dec.header.frame_rate(),
-                num_frames: dec.header.num_frames(),
-            };
-            let mut out = Cursor::new(Vec::<u8>::new());
-            write_swf_raw_tags(&header, &dec.data, &mut out)?;
+                if lock
+                    .iter()
+                    .any(|(name, _)| name.starts_with("sys") && name.ends_with(".dll"))
+                {
+                    println!(
+                        "sys DLL detected, waiting 4 seconds more to copy full files (sys1,sys2 etc.)."
+                    );
+                    std::thread::sleep(Duration::from_secs(4));
+                    break;
+                }
+            }
 
-            let frames = exporter.capture_frames(&mut out.into_inner())?;
+            if std::time::Instant::now() > deadline {
+                println!("Timeout reached, continue anyway.");
+                break;
+            }
+
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        println!("End!");
+
+        let mut index = 0;
+        let lock = swf_files.lock().unwrap();
+
+        if lock.is_empty() {
+            anyhow::bail!("No SWF files found");
+        }
+        let mut sorted: Vec<_> = lock.clone();
+
+        utils::sort_files(&mut sorted);
+        println!("Sorted files");
+        for (name, data) in sorted {
+            println!("Processing : {:?}", name);
+            let mut patched = patch_swf(&data)?;
+            let frames = exporter.capture_frames(&mut patched)?;
             for image in frames.iter() {
                 let width = image.width() as f64;
                 let height = image.height() as f64;
                 let mut page = Page::new(width, height);
-                let rgb_image = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
-
+                let mut rgb_image = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
+                let sigma = 0.8_f32;
+                let threshold = 0_i32;
+                imageops::unsharpen(&mut rgb_image, sigma, threshold);
                 let mut jpeg_buf = Cursor::new(Vec::new());
                 rgb_image.write_to(&mut jpeg_buf, ImageFormat::Jpeg)?;
 
@@ -101,12 +111,14 @@ fn main() -> anyhow::Result<()> {
                 page.add_image("img", pdf_image);
                 page.draw_image("img", 0.0, 0.0, width, height)?;
                 doc.add_page(page);
-                println!("Added frame to pdf: {}", i);
-                i += 1;
+                println!("Added frame to pdf: {}", index);
+                index += 1;
             }
         }
         println!("Finished frames, saving pdf file");
         doc.save(output.to_string_lossy().to_string())?;
+        let mut lock = swf_files.lock().unwrap();
+        lock.clear();
         std::thread::sleep(Duration::from_millis(1000));
     }
     Ok(())
