@@ -8,9 +8,7 @@ fn get_wineprefix() -> PathBuf {
         return PathBuf::from(env_prefix);
     }
     let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let default_prefix = PathBuf::from(home).join(".wine");
-
-    default_prefix
+    PathBuf::from(home).join(".wine")
 }
 
 pub fn setup_environment() -> Result<()> {

@@ -95,14 +95,22 @@ fn main() -> anyhow::Result<()> {
                 let width = image.width() as f64;
                 let height = image.height() as f64;
                 let mut page = Page::new(width, height);
-                let mut rgb_image = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
-                let sigma = 0.8_f32;
-                let threshold = 0_i32;
-                imageops::unsharpen(&mut rgb_image, sigma, threshold);
-                let mut jpeg_buf = Cursor::new(Vec::new());
-                rgb_image.write_to(&mut jpeg_buf, ImageFormat::Jpeg)?;
+                let jpeg_buf = {
+                    let rgba_clone = image.clone();
 
-                let pdf_image = Image::from_jpeg_data(jpeg_buf.into_inner())?;
+                    let rgb_image = DynamicImage::ImageRgba8(rgba_clone).to_rgb8();
+
+                    let sharpened = imageops::unsharpen(&rgb_image, 0.8, 0);
+
+                    let mut buf = Vec::with_capacity(256 * 1024);
+                    {
+                        let mut cursor = Cursor::new(&mut buf);
+                        sharpened.write_to(&mut cursor, ImageFormat::Jpeg)?;
+                    }
+
+                    buf
+                };
+                let pdf_image = Image::from_jpeg_data(jpeg_buf)?;
 
                 page.add_image("img", pdf_image);
                 page.draw_image("img", 0.0, 0.0, width, height)?;
