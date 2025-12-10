@@ -2,7 +2,7 @@
 name = "zKitap2pdf"
 version = "0.1.1"
 edition = "2024"
-description = "zKitap2pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)"
+description = "zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle"
 authors = ["vrdons <vrdons@proton.me>", "ErenayDev <erenaydev@proton.me>"]
 license = "MIT"
 repository = "https://github.com/vrdons/zKitap2pdf"
@@ -18,7 +18,7 @@ exclude = [
     "*.log",
     "debug/",
     "wine/",
-    "out/",
+    "*.pdf",
     "temp/",
     "in/"
 ]
@@ -26,12 +26,12 @@ exclude = [
 [dependencies]
 anyhow = "1.0.100"
 clap = { version ="4.5.53", features = ["derive"] }
-image = { version = "0.25.9", features=["png"] }
+image = { version = "0.25.9", features=["png", "jpeg"] }
 notify = "8.2.0"
 walkdir = "2.5.0"
-swf = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="swf" }
-ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_core", features = ["deterministic", "default_font"] }
-ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", branch = "master", package="ruffle_render_wgpu", features = ["clap"]}
+swf = { git = "https://github.com/ruffle-rs/ruffle.git", package="swf", rev = "5939da66c31f012158fbd29c612302e6742753c8" }
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package="ruffle_core", features = ["deterministic", "default_font"], rev = "5939da66c31f012158fbd29c612302e6742753c8" }
+ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package="ruffle_render_wgpu", features = ["clap"], rev = "5939da66c31f012158fbd29c612302e6742753c8" }
 futures = "0.3.31"
 oxidize-pdf = "1.6.6"
 
@@ -43,9 +43,9 @@ bin-dir = "{ bin }{ binary-ext }"
 assets = [
   { source = "target/release/zKitap2pdf", dest = "/usr/bin/zKitap2pdf", mode = "755" },
 ]
-summary = "Convert e-books EXE's to PDF"
+summary = "Convert Fernus Z-kitap e-books EXE's to PDF"
 description = """
-zKitap2pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)
+zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format. Using ruffle
 """
 license = "MIT"
 
@@ -53,7 +53,7 @@ license = "MIT"
 maintainer = "ErenayDev <erenaydev@proton.me>"
 copyright = "2025, ErenayDev <erenaydev@proton.me>"
 extended-description = """
-zKitap2pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)
+zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle
 """
 depends = "$auto"
 section = "utility"
