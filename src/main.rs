@@ -1,18 +1,13 @@
 use std::{
-    fs::File,
     io::Cursor,
-    path::Path,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use crate::{
     cli::Args,
     executable::{execute_exe, get_roaming_path, setup_environment},
-    utils::{patch_swf, sort_files},
+    utils::patch_swf,
 };
 
 use clap::Parser;
@@ -93,6 +88,8 @@ fn main() -> anyhow::Result<()> {
         println!("Sorted files");
         for (name, data) in sorted {
             println!("Processing : {:?}", name);
+            let mut lock = swf_files.lock().unwrap();
+            lock.retain(|(n, _)| n != &name);
             let mut patched = patch_swf(&data)?;
             let frames = exporter.capture_frames(&mut patched)?;
             for image in frames.iter() {
