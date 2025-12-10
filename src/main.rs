@@ -58,9 +58,9 @@ fn main() -> anyhow::Result<()> {
                     .any(|(name, _)| name.starts_with("sys") && name.ends_with(".dll"))
                 {
                     println!(
-                        "sys DLL detected, waiting 4 seconds more to copy full files (sys1,sys2 etc.)."
+                        "sys DLL detected, waiting 5 seconds more to copy full files (sys1,sys2 etc.)."
                     );
-                    std::thread::sleep(Duration::from_secs(4));
+                    std::thread::sleep(Duration::from_secs(5));
                     break;
                 }
             }
