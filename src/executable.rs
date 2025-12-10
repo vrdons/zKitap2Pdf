@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::{env, fs};
 
-fn get_wineprefix() -> Result<PathBuf> {
+fn get_wineprefix() -> PathBuf {
     if let Ok(env_prefix) = env::var("WINEPREFIX") {
-        Ok(PathBuf::from(env_prefix))
-    } else {
-        Err(anyhow!("WINEPREFIX environment variable is not set"))
+        return PathBuf::from(env_prefix);
     }
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let default_prefix = PathBuf::from(home).join(".wine");
+
+    default_prefix
 }
 
 pub fn setup_environment() -> Result<()> {
@@ -21,7 +23,7 @@ pub fn setup_environment() -> Result<()> {
             .spawn()
             .map_err(|_| anyhow!("Wine not installed or not found in PATH"))?;
 
-        let prefix = get_wineprefix()?;
+        let prefix = get_wineprefix();
         fs::create_dir_all(&prefix)?;
 
         Command::new("wineboot")
@@ -41,7 +43,7 @@ pub fn get_roaming_path() -> Result<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        let wineprefix = get_wineprefix()?;
+        let wineprefix = get_wineprefix();
         Ok(wineprefix
             .join("drive_c")
             .join("users")
@@ -63,8 +65,10 @@ pub fn get_roaming_path() -> Result<PathBuf> {
 pub fn execute_exe(path: &Path) -> Result<Child> {
     #[cfg(target_os = "linux")]
     {
+        let prefix = get_wineprefix();
         Command::new("wine")
             .arg(path)
+            .env("WINEPREFIX", &prefix)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null())
