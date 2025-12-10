@@ -11,10 +11,14 @@ All notable changes to this project will be documented in this file.
 - Don't clear temp file when loading
 - "Output file must be a PDF" when using single file
 - Tiny memory leakage
+- Errors, small memory leakage
+- Windows build fix and windows specific drive I/O optimization
+- Windows build fix
 
 ### Features
 
 - Additional improvements and fixes
+- Update sys.dll wait timeout from 4 to 5
 
 ### Miscellaneous Tasks
 
@@ -26,6 +30,7 @@ All notable changes to this project will be documented in this file.
 - Move take_screenshot to exporter
 - Drop paths.rs
 - Bump version to 0.1.2
+- Update changelog for v0.1.2
 
 ### Refactor
 
