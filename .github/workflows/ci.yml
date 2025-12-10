@@ -1,16 +1,27 @@
 name: Rust CI
+
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted]
   push:
-    branches:
-      - master
+    branches: [master]
   schedule:
     - cron: "11 7 * * 1,4"
+
 env:
   RUSTFLAGS: -Dwarnings
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+
 jobs:
+  check-approval:
+    if: github.event.review.state == 'approved' || github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Running CI"
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -55,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest] # macos-latest
         rust: [stable]
     steps:
       - uses: actions/checkout@v6

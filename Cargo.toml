@@ -1,14 +1,14 @@
 [package]
-name = "zKitap2pdf"
+name = "zKitap2Pdf"
 version = "0.1.1"
 edition = "2024"
-description = "zKitap2pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)"
+description = "zKitap2Pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)"
 authors = ["vrdons <vrdons@proton.me>", "ErenayDev <erenaydev@proton.me>"]
 license = "MIT"
-repository = "https://github.com/vrdons/zKitap2pdf"
-homepage = "https://github.com/vrdons/zKitap2pdf"
+repository = "https://github.com/vrdons/zKitap2Pdf"
+homepage = "https://github.com/vrdons/zKitap2Pdf"
 readme = "README.md"
-keywords = ["zKitap", "sfw", "flash", "ruffle", "zKitap2pdf"]
+keywords = ["zKitap", "sfw", "flash", "ruffle", "zKitap2Pdf"]
 rust-version = "1.87"
 exclude = [
     "target/",
@@ -41,11 +41,11 @@ bin-dir = "{ bin }{ binary-ext }"
 
 [package.metadata.generate-rpm]
 assets = [
-  { source = "target/release/zKitap2pdf", dest = "/usr/bin/zKitap2pdf", mode = "755" },
+  { source = "target/release/zKitap2Pdf", dest = "/usr/bin/zKitap2Pdf", mode = "755" },
 ]
 summary = "Convert e-books EXE's to PDF"
 description = """
-zKitap2pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)
+zKitap2Pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)
 """
 license = "MIT"
 
@@ -53,12 +53,12 @@ license = "MIT"
 maintainer = "ErenayDev <erenaydev@proton.me>"
 copyright = "2025, ErenayDev <erenaydev@proton.me>"
 extended-description = """
-zKitap2pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)
+zKitap2Pdf is a tool for converting e-books from exe to pdf format. Works on GPU (OpenGL, Vulkan, DX12 etc.)
 """
 depends = "$auto"
 section = "utility"
 priority = "optional"
 assets = [
-    ["target/release/zKitap2pdf", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/zKitap2pdf/", "644"],
+    ["target/release/zKitap2Pdf", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/zKitap2Pdf/", "644"],
 ]
