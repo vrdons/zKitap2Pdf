@@ -1,6 +1,6 @@
 # zKitap2Pdf
 
-zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle
+zKitap2Pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle
 
 [![Rust CI](https://img.shields.io/github/actions/workflow/status/vrdons/zKitap2Pdf/ci.yml?style=for-the-badge&label=Rust%20CI)](https://github.com/vrdons/zKitap2Pdf/actions/workflows/ci.yml)
 
@@ -10,7 +10,7 @@ zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf forma
 If you are using Linux, you may need to install additional dependencies such as `wine`
 
 ### Prebuilt Binaries
-You can download prebuilt binaries for **Linux** and **Windows** from the [Releases page](https://github.com/vrdons/zKitap2pdf/releases).
+You can download prebuilt binaries for **Linux** and **Windows** from the [Releases page](https://github.com/vrdons/zKitap2Pdf/releases).
 
 | System / Distribution | File Extension | Description |
 |:----------------------|:---------------|:------------|
@@ -44,7 +44,7 @@ We tested in Linux and Windows. It works fine. But we are not rich for buying a 
 Contributions are welcome! Issues, PR's etc.
 
 <a href="https://github.com/vrdons/zKitap2Pdf/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=vrdons/zKitap2Pdf" />
+    <img src="https://contrib.rocks/image?repo=vrdons/zKitap2Pdf" alt="zKitap2Pdf contributors" />
 </a>
 
 ---

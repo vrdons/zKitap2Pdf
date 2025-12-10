@@ -43,7 +43,7 @@ assets = [
 ]
 summary = "Convert Fernus Z-kitap e-books EXE's to PDF"
 description = """
-zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format. Using ruffle
+zKitap2Pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format. Using ruffle
 """
 license = "MIT"
 
@@ -51,7 +51,7 @@ license = "MIT"
 maintainer = "ErenayDev <erenaydev@proton.me>"
 copyright = "2025, ErenayDev <erenaydev@proton.me>"
 extended-description = """
-zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle
+zKitap2Pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle
 """
 depends = "$auto"
 section = "utility"
