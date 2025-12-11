@@ -54,8 +54,11 @@ impl Exporter {
         })
     }
 
-    pub fn capture_frames(&self, file: &mut [u8]) -> Result<Vec<RgbaImage>> {
-        let movie = SwfMovie::from_data(file, "movie.swf".to_string(), None)?;
+    pub fn capture_frames<F>(&self, file: &mut Vec<u8>, mut on_frame: F) -> Result<()>
+    where
+        F: FnMut(u16, RgbaImage, bool),
+    {
+        let movie = SwfMovie::from_data(file, "".to_string(), None)?;
         let total_frames = movie.num_frames();
 
         let width = movie.width().to_pixels();
@@ -63,6 +66,7 @@ impl Exporter {
 
         let height = movie.height().to_pixels();
         let height = (height * self.scale).round() as u32;
+        println!("W: {} H: {}", width, height);
 
         let target = TextureTarget::new(&self.descriptors.device, (width, height))
             .map_err(|e| anyhow!(e.to_string()))?;
@@ -75,8 +79,6 @@ impl Exporter {
             .with_movie(movie)
             .with_viewport_dimensions(width, height, self.scale)
             .build();
-
-        let mut result = Vec::new();
 
         println!("Toplam kare sayısı: {}", total_frames);
 
@@ -102,7 +104,7 @@ impl Exporter {
             match capture_attempt {
                 Ok(Ok(Some(img))) => {
                     println!("Frame {} captured.", i);
-                    result.push(img);
+                    on_frame(i, img, i == total_frames - 1);
                 }
                 Ok(Ok(None)) => {
                     eprintln!("Uyarı: Frame {} yakalanamadı (Boş Görüntü).", i);
@@ -116,6 +118,6 @@ impl Exporter {
             }
         }
 
-        Ok(result)
+        Ok(())
     }
 }

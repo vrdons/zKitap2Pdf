@@ -4018,6 +4018,7 @@ dependencies = [
  "ruffle_core",
  "ruffle_render_wgpu",
  "swf",
+ "tempfile",
  "walkdir",
 ]
 
