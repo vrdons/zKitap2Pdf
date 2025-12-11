@@ -14,7 +14,7 @@ pub struct Args {
     pub output: Option<PathBuf>,
 
     /// Scale factor for the image (bigger = better quality)
-    #[clap(short = 's', long, default_value_t = 20 ,value_parser = clap::value_parser!(u64).range(10..=30))]
+    #[clap(short = 's', long, default_value_t = 28 ,value_parser = clap::value_parser!(u64).range(10..=30))]
     pub scale: u64,
 
     #[clap(long, short, default_value = "default")]
