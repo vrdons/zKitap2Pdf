@@ -9,7 +9,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use oxidize_pdf::{Document, Image, Page};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, Write};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
 use crate::cli::Files;
 use crate::exporter::Exporter;
@@ -22,6 +22,7 @@ pub struct HandleArgs {
 }
 
 pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
     let input_file = args.file.input.clone();
     let width = (566.0 * args.scale).round();
     let height = (800.0 * args.scale).round();
@@ -64,6 +65,7 @@ pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
                         &file_path_for_exporter,
                         tx.clone(),
                         &mut total_frames,
+                        &temp_dir,
                     )
                     .unwrap();
                 } else {
@@ -109,6 +111,7 @@ pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
                             &file_path_for_exporter,
                             tx.clone(),
                             &mut total_frames,
+                            &temp_dir,
                         )
                         .unwrap();
                     }
@@ -125,8 +128,8 @@ fn start_exporter(
     input: &PathBuf,
     tx: Sender<ExporterEvents>,
     total_frames: &mut u32,
+    temp_dir: &TempDir,
 ) -> Result<()> {
-    let temp_dir = tempfile::tempdir()?;
     let mut file: File = File::open(input)?;
     let mut patched = {
         let decompressed = swf::decompress_swf(&mut file)?;
