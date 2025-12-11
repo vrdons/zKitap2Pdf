@@ -1,19 +1,23 @@
+use anyhow::{Result, anyhow};
 use image::RgbaImage;
 use ruffle_core::{PlayerBuilder, limits::ExecutionLimit, tag_utils::SwfMovie};
 use ruffle_render_wgpu::{
-    backend::WgpuRenderBackend, backend::request_adapter_and_device, clap::GraphicsBackend,
-    descriptors::Descriptors, target::TextureTarget, wgpu,
+    backend::{WgpuRenderBackend, request_adapter_and_device},
+    clap::GraphicsBackend,
+    descriptors::Descriptors,
+    target::TextureTarget,
+    wgpu,
 };
-use std::sync::Arc;
-
-use anyhow::{Result, anyhow};
+use std::{
+    any::Any,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
+};
 
 #[derive(Copy, Clone)]
 pub struct SizeOpt {
     pub scale: f64,
-
     pub width: u32,
-
     pub height: u32,
 }
 
@@ -33,6 +37,7 @@ impl Exporter {
             backends: opt.graphics.into(),
             ..Default::default()
         });
+
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
             opt.graphics.into(),
             &instance,
@@ -50,8 +55,8 @@ impl Exporter {
     }
 
     pub fn capture_frames(&self, file: &mut [u8]) -> Result<Vec<RgbaImage>> {
-        let movie = SwfMovie::from_data(file, "".to_string(), None)?;
-        let total_frame = movie.num_frames();
+        let movie = SwfMovie::from_data(file, "movie.swf".to_string(), None)?;
+        let total_frames = movie.num_frames();
 
         let width = movie.width().to_pixels();
         let width = (width * self.scale).round() as u32;
@@ -61,6 +66,7 @@ impl Exporter {
 
         let target = TextureTarget::new(&self.descriptors.device, (width, height))
             .map_err(|e| anyhow!(e.to_string()))?;
+
         let player = PlayerBuilder::new()
             .with_renderer(
                 WgpuRenderBackend::new(self.descriptors.clone(), target)
@@ -69,33 +75,47 @@ impl Exporter {
             .with_movie(movie)
             .with_viewport_dimensions(width, height, self.scale)
             .build();
+
         let mut result = Vec::new();
 
-        let mut locked_player = player.lock().unwrap();
-        for i in 0..total_frame {
-            locked_player.preload(&mut ExecutionLimit::none());
+        println!("Toplam kare sayısı: {}", total_frames);
 
-            locked_player.run_frame();
-            locked_player.render();
+        for i in 0..total_frames {
+            let capture_attempt: Result<Result<Option<RgbaImage>>, Box<dyn Any + Send>> = {
+                let mut locked_player = player.lock().unwrap();
 
-            let image = {
-                let renderer =
-                    <dyn std::any::Any>::downcast_mut::<WgpuRenderBackend<TextureTarget>>(
+                locked_player.preload(&mut ExecutionLimit::none());
+                locked_player.run_frame();
+                locked_player.render();
+
+                catch_unwind(AssertUnwindSafe(|| {
+                    let renderer = <dyn Any>::downcast_mut::<WgpuRenderBackend<TextureTarget>>(
                         locked_player.renderer_mut(),
                     )
                     .ok_or_else(|| anyhow!("Renderer type mismatch"))?;
 
-                renderer.capture_frame()
+                    let frame: Option<RgbaImage> = renderer.capture_frame();
+                    Ok(frame)
+                }))
             };
 
-            match image {
-                Some(img) => {
-                    println!("Capturing frame: {}", i);
+            match capture_attempt {
+                Ok(Ok(Some(img))) => {
+                    println!("Frame {} captured.", i);
                     result.push(img);
                 }
-                None => return Err(anyhow!("No frame captured")),
+                Ok(Ok(None)) => {
+                    eprintln!("Uyarı: Frame {} yakalanamadı (Boş Görüntü).", i);
+                }
+                Ok(Err(e)) => {
+                    return Err(anyhow!("Frame {} render/downcast hatası: {:?}", i, e));
+                }
+                Err(e) => {
+                    eprintln!("Frame {} işlenirken kurtarılamaz panik oluştu: {:?}", i, e);
+                }
             }
         }
+
         Ok(result)
     }
 }
