@@ -1,13 +1,8 @@
-use std::{
-    io::Cursor,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{io::Cursor, path::Path};
 use swf::{Header, Rectangle, SwfBuf, Twips, write::write_swf_raw_tags};
 
 use anyhow::Result;
 use walkdir::WalkDir;
-pub type FileBuffer = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
 pub fn find_files(path: &Path, extension: &str) -> anyhow::Result<Vec<String>> {
     let mut file_paths = Vec::new();

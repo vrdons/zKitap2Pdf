@@ -107,13 +107,13 @@ impl Exporter {
                     on_frame(i, img, i == total_frames - 1);
                 }
                 Ok(Ok(None)) => {
-                    eprintln!("Uyarı: Frame {} yakalanamadı (Boş Görüntü).", i);
+                    eprintln!("WARN: Frame {} captured an empty image.", i);
                 }
                 Ok(Err(e)) => {
-                    return Err(anyhow!("Frame {} render/downcast hatası: {:?}", i, e));
+                    return Err(anyhow!("render/downcast error on frame {}: {:?}", i, e));
                 }
                 Err(e) => {
-                    eprintln!("Frame {} işlenirken kurtarılamaz panik oluştu: {:?}", i, e);
+                    eprintln!("Paniced on frame {}: {:?}", i, e);
                 }
             }
         }
