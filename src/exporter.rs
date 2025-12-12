@@ -57,7 +57,7 @@ impl Exporter {
 
     pub fn capture_frames<F>(&self, path: &PathBuf, mut on_frame: F) -> Result<()>
     where
-        F: FnMut(u16, RgbaImage, bool),
+        F: FnMut(u16, RgbaImage),
     {
         let movie = movie_from_path(path, None).map_err(|e| anyhow!(e.to_string()))?;
         let total_frames = movie.num_frames();
@@ -107,7 +107,7 @@ impl Exporter {
             match capture_attempt {
                 Ok(Ok(Some(img))) => {
                     println!("Frame {} captured.", i);
-                    on_frame(i, img, i == total_frames - 1);
+                    on_frame(i, img);
                 }
                 Ok(Ok(None)) => {
                     eprintln!("WARN: Frame {} captured an empty image.", i);

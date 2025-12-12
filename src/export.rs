@@ -120,7 +120,7 @@ fn start_exporter(
     tx: Sender<ExporterEvents>,
     temp_dir: &TempDir,
 ) -> Result<()> {
-    exporter.capture_frames(input, |_, image, end| {
+    exporter.capture_frames(input, |_, image| {
         let jpeg_buf = {
             let rgb_image = DynamicImage::ImageRgba8(image).to_rgb8();
             let mut jpeg_buf = Cursor::new(Vec::new());
@@ -139,10 +139,10 @@ fn start_exporter(
         if let Err(e) = temp_file.write_all(&jpeg_buf) {
             eprintln!("Failed to write temp file: {}", e);
         }
-        let _ = tx.send(ExporterEvents::Frame(temp_file)).is_err();
-        if end && tx.send(ExporterEvents::FinishFrame).is_err() {}
+        let _ = tx.send(ExporterEvents::Frame(temp_file));
     })?;
 
+    let _ = tx.send(ExporterEvents::FinishFrame);
     Ok(())
 }
 
