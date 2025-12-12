@@ -120,12 +120,18 @@ fn start_exporter(
         let jpeg_buf = {
             let rgb_image = DynamicImage::ImageRgba8(image).to_rgb8();
             let mut jpeg_buf = Cursor::new(Vec::new());
-            rgb_image.write_to(&mut jpeg_buf, ImageFormat::Jpeg).ok();
+            if let Err(e) = rgb_image.write_to(&mut jpeg_buf, ImageFormat::Jpeg) {
+                eprintln!("Failed to encode JPEG: {}", e);
+                return;
+            }
             jpeg_buf.into_inner()
         };
-        let path = NamedTempFile::new_in(temp_dir.path()).unwrap();
-        fs::write(path.path(), &jpeg_buf).ok();
-        tx.send(ExporterEvents::Frame(path)).unwrap();
+        let temp_file = NamedTempFile::new_in(temp_dir.path()).unwrap();
+        if let Err(e) = fs::write(temp_file.path(), &jpeg_buf) {
+            eprintln!("Failed to write temp file: {}", e);
+            return;
+        }
+        tx.send(ExporterEvents::Frame(temp_file)).unwrap();
         if end {
             tx.send(ExporterEvents::FinishFrame).unwrap();
         }
