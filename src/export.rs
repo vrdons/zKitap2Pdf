@@ -44,7 +44,7 @@ pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
         let event = match rx.recv() {
             Ok(e) => e,
             Err(_) => {
-                println!("Watcher thread işini bitirdi. Event dinleme sonlandırılıyor.");
+                println!("Watcher thread finished. Stopping event listener.");
                 break;
             }
         };
@@ -201,7 +201,7 @@ fn watch_roaming(sender: Sender<ExporterEvents>) -> Result<()> {
                     }
                 }
                 last_processed.insert(filename.clone(), now);
-                println!("Dosya yakalandı: {}", filename);
+                println!("File captured: {}", filename);
                 let mut tempfile = NamedTempFile::new().expect("Failed to create temporary file");
 
                 tempfile

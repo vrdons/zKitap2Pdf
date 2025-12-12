@@ -85,7 +85,9 @@ impl Exporter {
 
         for i in 0..total_frames {
             let capture_attempt: Result<Result<Option<RgbaImage>>, Box<dyn Any + Send>> = {
-                let mut locked_player = player.lock().unwrap();
+                let mut locked_player = player
+                    .lock()
+                    .map_err(|e| anyhow!("Mutex poisoned: {}", e))?;
 
                 locked_player.preload(&mut ExecutionLimit::none());
                 locked_player.run_frame();
