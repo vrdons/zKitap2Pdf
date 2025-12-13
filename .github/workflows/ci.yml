@@ -3,8 +3,8 @@ name: Rust CI
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  pull_request_review:
-    types: [submitted]
+  # pull_request_review:
+  #   types: [submitted]
   push:
     branches: [master]
 
@@ -14,12 +14,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check-approval:
-    if: github.event_name != 'pull_request_review' || github.event.review.state == 'approved'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Running CI"
-
+  # check-approval:
+  #   if: github.event_name != 'pull_request_review' || github.event.review.state == 'approved'
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - run: echo "Running CI"
   fmt:
     runs-on: ubuntu-latest
     steps:
