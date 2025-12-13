@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.2] - 2025-12-10
+## [0.1.3] - 2025-12-13
 
 ### Bug Fixes
 
@@ -14,6 +14,22 @@ All notable changes to this project will be documented in this file.
 - Errors, small memory leakage
 - Windows build fix and windows specific drive I/O optimization
 - Windows build fix
+- Update drive-size, fix check-approval event condition
+- Update project name from zKitap2pdf to zKitap2Pdf
+- Remove browser environment
+- High mem usage when decrypting
+- Blurry pdf file
+- Temp_dir deleted after finishing process (untested)
+- Potentional .unwrap() crash
+- Potentional blocked loop
+- Silent error suppression loses frames without warning.
+- Dropping temp files when not finished
+- Potential panic, detailed panic error
+- Potential panic, detailed panic error
+- Do not clone rx when starting exporter
+- Expect() in watcher thread can panic and crash the application.
+- Wrong commit preprocessor github URL
+- Correct file name and file path
 
 ### Features
 
@@ -31,11 +47,25 @@ All notable changes to this project will be documented in this file.
 - Drop paths.rs
 - Bump version to 0.1.2
 - Update changelog for v0.1.2
+- Update changelog for v0.1.2
+- Fix minor issues
+- Do not patch swf on ram
+- Error collecting
+- More detailed .unwrap() crash
+- Drop end variable
+- Consider creating a new temp file for the patched SWF.
+- Added out and .wine directories
+- Fixed path symlinks
 
 ### Refactor
 
 - Add support for single output file
 - Do not use paths::WINE
+- Apply coderabbit recommendations
+- Apply coderabbit recommendations
+- Improve exporter stability and panic tolerance
+- Apply ai suggestions
+- Wait until finishing modify swf file
 
 ### Testing
 
@@ -44,10 +74,15 @@ All notable changes to this project will be documented in this file.
 ### Ci
 
 - Drop macos support
+- Removed CI action triggering behaivor when a review is added temporarily
 
 ### Merge
 
 - Integrate changes from feat/refactor-code
+
+### Revert
+
+- Chore(git): added out and .wine directories
 
 ## [0.1.1] - 2025-12-09
 
