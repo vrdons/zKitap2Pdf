@@ -57,7 +57,10 @@ pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
                     let file_path_for_exporter = next_file.path().to_path_buf();
                     println!("-- Started Processing: {:?}", file_path_for_exporter);
                     current_swf_file = Some(next_file);
-                    start_exporter(exporter, &file_path_for_exporter, tx.clone(), &temp_dir)?;
+                    start_exporter(exporter, &file_path_for_exporter, &temp_dir, |file| {
+                        let _ = tx.send(ExporterEvents::Frame(file));
+                    })?;
+                    let _ = tx.send(ExporterEvents::FinishFrame);
                 } else {
                     println!("-- No more swf to process");
                     if tx.send(ExporterEvents::FinishSWF).is_err() {
@@ -99,7 +102,10 @@ pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
                         let file_path_for_exporter = next_file.path().to_path_buf();
                         println!("-- Started Processing: {:?}", file_path_for_exporter);
                         current_swf_file = Some(next_file);
-                        start_exporter(exporter, &file_path_for_exporter, tx.clone(), &temp_dir)?;
+                        start_exporter(exporter, &file_path_for_exporter, &temp_dir, |file| {
+                            let _ = tx.send(ExporterEvents::Frame(file));
+                        })?;
+                        let _ = tx.send(ExporterEvents::FinishFrame);
                     }
                 }
             }
@@ -116,8 +122,8 @@ pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
 fn start_exporter(
     exporter: &Exporter,
     input: &PathBuf,
-    tx: Sender<ExporterEvents>,
     temp_dir: &TempDir,
+    mut on_frame: impl FnMut(NamedTempFile),
 ) -> Result<()> {
     exporter.capture_frames(input, |_, image| {
         let jpeg_buf = {
@@ -141,10 +147,9 @@ fn start_exporter(
         if let Err(e) = temp_file.write_all(&jpeg_buf) {
             eprintln!("Failed to write temp file: {}", e);
         }
-        let _ = tx.send(ExporterEvents::Frame(temp_file));
+        on_frame(temp_file);
     })?;
 
-    let _ = tx.send(ExporterEvents::FinishFrame);
     Ok(())
 }
 
@@ -220,10 +225,7 @@ fn watch_roaming(sender: Sender<ExporterEvents>) -> Result<()> {
                         break;
                     }
                     for (_name, tmpfile) in pending.into_iter() {
-                        if sender
-                            .send(ExporterEvents::FoundSWF(tmpfile))
-                            .is_err()
-                        {
+                        if sender.send(ExporterEvents::FoundSWF(tmpfile)).is_err() {
                             return Ok(());
                         }
                     }
