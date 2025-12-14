@@ -1,5 +1,5 @@
 use std::{io::Cursor, path::Path};
-use swf::{Header, Rectangle, SwfBuf, Twips, write::write_swf_raw_tags};
+use swf::{Header, Rectangle, SwfBuf, Tag, Twips, parse_swf, write::write_swf_raw_tags};
 
 use anyhow::Result;
 use walkdir::WalkDir;
@@ -53,4 +53,22 @@ pub fn patch_swf(file: SwfBuf, width: f64, height: f64) -> Result<Vec<u8>> {
     let mut out = Cursor::new(Vec::<u8>::new());
     write_swf_raw_tags(&header, &file.data, &mut out)?;
     Ok(out.into_inner())
+}
+
+pub fn find_real_size(buf: &SwfBuf) -> Result<(f64, f64)> {
+    let parsed = parse_swf(buf)?;
+    let mut width = parsed.header.stage_size().x_max.to_pixels();
+    let mut height = parsed.header.stage_size().y_max.to_pixels();
+    for tag in &parsed.tags {
+        if let Tag::DefineShape(shape) = tag {
+            let b = shape.shape_bounds;
+            update_bounds(&mut width, &mut height, b);
+        }
+    }
+
+    Ok((width, height))
+}
+fn update_bounds(max_x: &mut f64, max_y: &mut f64, rect: Rectangle<Twips>) {
+    *max_x = (*max_x).max(rect.x_max.to_pixels());
+    *max_y = (*max_y).max(rect.y_max.to_pixels());
 }

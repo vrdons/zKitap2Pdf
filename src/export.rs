@@ -13,6 +13,7 @@ use tempfile::{NamedTempFile, TempDir};
 
 use crate::cli::Files;
 use crate::exporter::Exporter;
+use crate::utils::find_real_size;
 use crate::{executable, utils};
 
 #[derive(Debug, Clone)]
@@ -24,8 +25,8 @@ pub struct HandleArgs {
 pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let input_file = args.file.input.clone();
-    let width = 566.0;
-    let height = 807.0;
+    let mut width = 566.0;
+    let mut height = 807.0;
     let mut doc = Document::new();
     doc.set_title(args.file.filename);
     doc.set_author("Rust Developer");
@@ -90,6 +91,10 @@ pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
                 let mut read = File::open(file_path.path())?;
                 let patched = {
                     let decompressed = swf::decompress_swf(&mut read)?;
+                    let (w, h) = find_real_size(&decompressed)?;
+                    println!("Real Size: {:?}", (w, h));
+                    width = w;
+                    height = h;
                     utils::patch_swf(decompressed, width, height)?
                 };
                 let mut patched_file = tempfile::NamedTempFile::new_in(temp_dir.path())?;
