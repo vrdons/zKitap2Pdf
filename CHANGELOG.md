@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3-hotfix] - 2025-12-14
+
+### Bug Fixes
+
+- Unknown swf file
+- Unknown swf file
+- Pdf image was big
+- Some SWF files has different size, needs reshape
+
+### Revert
+
+- "refactor(watch_roaming): wait until finishing modify swf file"
+
 ## [0.1.3] - 2025-12-13
 
 ### Bug Fixes
@@ -56,6 +69,7 @@ All notable changes to this project will be documented in this file.
 - Consider creating a new temp file for the patched SWF.
 - Added out and .wine directories
 - Fixed path symlinks
+- Bump version to 0.1.3
 
 ### Refactor
 
@@ -64,7 +78,7 @@ All notable changes to this project will be documented in this file.
 - Apply coderabbit recommendations
 - Apply coderabbit recommendations
 - Improve exporter stability and panic tolerance
-- Apply ai suggestions
+- Apply ai changes
 - Wait until finishing modify swf file
 
 ### Testing
@@ -79,6 +93,10 @@ All notable changes to this project will be documented in this file.
 ### Merge
 
 - Integrate changes from feat/refactor-code
+
+### Recator
+
+- Apply ai suggestion
 
 ### Revert
 
