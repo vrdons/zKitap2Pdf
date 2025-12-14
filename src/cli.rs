@@ -6,7 +6,7 @@ use ruffle_render_wgpu::clap::GraphicsBackend;
 #[derive(Parser, Debug)]
 pub struct Args {
     /// Input file
-    #[arg(short, long)]
+    #[arg(value_name = "INPUT")]
     pub input: PathBuf,
 
     /// Output file
