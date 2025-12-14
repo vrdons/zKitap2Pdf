@@ -23,6 +23,36 @@ pub struct HandleArgs {
     pub scale: f64,
 }
 
+/// Coordinates discovery, extraction, and conversion of SWF assets into a single PDF.
+///
+/// The function watches a roaming directory for SWF (and special process) files, starts the external
+/// input executable, captures frames from each discovered SWF via the provided Exporter, assembles
+/// captured JPEG frames into PDF pages (scaled by `args.scale`), and writes the final PDF to the
+/// path specified in `args.file.output`. It also inspects special process payloads discovered as
+/// "p.dll" and prints any embedded JSON found there.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::PathBuf;
+/// use crate::exporter::Exporter;
+/// use crate::cli::Files;
+/// use crate::handle::HandleArgs;
+///
+/// // Construct exporter and args appropriate for your application.
+/// let exporter = Exporter::default();
+/// let args = HandleArgs {
+///     file: Files {
+///         input: PathBuf::from("input.exe"),
+///         output: PathBuf::from("out.pdf"),
+///         filename: "out.pdf".into(),
+///     },
+///     scale: 1.0,
+/// };
+///
+/// // Run the coordinated extraction and PDF export.
+/// handle_exe(&exporter, args).unwrap();
+/// ```
 pub fn handle_exe(exporter: &Exporter, args: HandleArgs) -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let input_file = args.file.input.clone();
@@ -172,6 +202,19 @@ fn start_child(input: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Watches the user's roaming directory for new SWF or special process files and forwards discovered items as `ExporterEvents` on the provided sender.
+///
+/// This function monitors the roaming path recursively for file modifications. When a modified file is recognized as an SWF (magic `FWS`, `CWS`, or `ZWS`) it buffers the file until activity quiets and then sends either `ExporterEvents::FoundSWF` for normal SWF files or `ExporterEvents::FoundProcess` for a file named `p.dll`. The function returns after a period of inactivity or on watcher error.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::sync::mpsc::channel;
+/// // assume ExporterEvents is in scope
+/// let (tx, _rx) = channel();
+/// // run the watcher (non-blocking example would spawn this in a thread)
+/// let _ = watch_roaming(tx);
+/// ```
 fn watch_roaming(sender: Sender<ExporterEvents>) -> Result<()> {
     let roaming_path = executable::get_roaming_path()?;
     println!("Watching roaming path: {:?}", roaming_path);

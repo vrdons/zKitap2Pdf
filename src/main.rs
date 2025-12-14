@@ -11,6 +11,27 @@ pub mod exporter;
 pub mod utils;
 pub mod crypto;
 
+/// Parse command-line arguments, initialize the exporter and environment, process each input file, and report any per-file failures.
+
+///
+
+/// Processes each file from the parsed CLI arguments by invoking the export handler. Per-file errors are collected and printed after processing all files; the program still returns success unless an initialization step fails (argument validation, exporter construction, or environment setup).
+
+///
+
+/// # Examples
+
+///
+
+/// ```no_run
+
+/// # use anyhow::Result;
+
+/// # fn try_main() -> Result<()> { crate::main() }
+
+/// # let _ = try_main();
+
+/// ```
 fn main() -> anyhow::Result<()> {
     let args = Args::parse().validate()?;
     let exporter = exporter::Exporter::new(&exporter::ExporterOpt {
