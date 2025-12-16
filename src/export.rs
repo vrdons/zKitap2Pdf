@@ -238,11 +238,14 @@ fn watch_roaming(sender: Sender<ExporterEvents>) -> Result<()> {
                         println!("No SWF found. Watcher exiting silently.");
                         break;
                     }
+                    let pending_len = pending.len();
                     for (name, tmpfile) in pending.into_iter() {
-                        if name == "p.dll" {
-                            let _ = sender.send(ExporterEvents::FoundProcess(tmpfile));
-                        } else if sender.send(ExporterEvents::FoundSWF(tmpfile)).is_err() {
+                        if name == "p.dll" && pending_len == 1 {
+                            if sender.send(ExporterEvents::FoundProcess(tmpfile)).is_err() {
                                 return Ok(());
+                            }
+                        } else if sender.send(ExporterEvents::FoundSWF(tmpfile)).is_err() {
+                            return Ok(());
                         }
                     }
 

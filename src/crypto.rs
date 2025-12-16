@@ -1,11 +1,11 @@
-use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use anyhow::{Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use block_padding::Pkcs7;
-use blowfish::cipher::{BlockDecryptMut, KeyInit};
 use blowfish::Blowfish;
+use blowfish::cipher::{BlockDecryptMut, KeyInit};
 use ecb::Decryptor;
 use swf::avm2::types::AbcFile;
-use swf::{avm2::read::Reader, parse_swf, SwfBuf};
+use swf::{SwfBuf, avm2::read::Reader, parse_swf};
 
 const PUSHSTRING_OPCODE: u8 = 44;
 const STRING_PREFIX: &str = "==";
@@ -96,15 +96,13 @@ impl KKDecryptor {
 
         let cleaned: String = transformed.chars().filter(|c| !c.is_whitespace()).collect();
 
-        let mut encrypted = BASE64
-            .decode(cleaned)?;
+        let mut encrypted = BASE64.decode(cleaned)?;
 
         type BlowfishEcb = Decryptor<Blowfish>;
 
         let cipher = BlowfishEcb::new_from_slice(key.as_bytes())?;
 
-        let decrypted = cipher
-            .decrypt_padded_mut::<Pkcs7>(&mut encrypted).unwrap();
+        let decrypted = cipher.decrypt_padded_mut::<Pkcs7>(&mut encrypted).unwrap();
 
         Ok(String::from_utf8_lossy(decrypted).into_owned())
     }
@@ -113,8 +111,7 @@ impl KKDecryptor {
         let reversed: String = input.chars().rev().collect();
         let cleaned: String = reversed.chars().filter(|c| !c.is_whitespace()).collect();
 
-        let decoded = BASE64
-            .decode(cleaned)?;
+        let decoded = BASE64.decode(cleaned)?;
 
         let xored = self.apply_xor(&decoded, key);
         Ok(String::from_utf8_lossy(&xored).into_owned())
