@@ -31,7 +31,7 @@ swf = { git = "https://github.com/ruffle-rs/ruffle.git", package="swf", rev = "5
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package="ruffle_core", features = ["deterministic", "default_font"], rev = "5939da66c31f012158fbd29c612302e6742753c8" }
 ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package="ruffle_render_wgpu", features = ["clap"], rev = "5939da66c31f012158fbd29c612302e6742753c8" }
 futures = "0.3.31"
-oxidize-pdf = "1.6.6"
+oxidize-pdf = "1.6.7"
 tempfile = "3.23.0"
 
 [package.metadata.binstall]
