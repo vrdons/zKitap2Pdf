@@ -1,10 +1,11 @@
-use std::{io::Cursor, path::Path};
-use swf::{Header, Rectangle, SwfBuf, Tag, Twips, parse_swf, write::write_swf_raw_tags};
+use std::io::Cursor;
+use std::path::Path;
 
 use anyhow::Result;
+use swf::{Header, Rectangle, SwfBuf, Tag, Twips, parse_swf, write::write_swf_raw_tags};
 use walkdir::WalkDir;
 
-pub fn find_files(path: &Path, extension: &str) -> anyhow::Result<Vec<String>> {
+pub fn find_files(path: &Path, extension: &str) -> Result<Vec<String>> {
     let mut file_paths = Vec::new();
 
     for entry in WalkDir::new(path)
@@ -12,15 +13,17 @@ pub fn find_files(path: &Path, extension: &str) -> anyhow::Result<Vec<String>> {
         .into_iter()
         .filter_map(Result::ok)
     {
-        if entry.file_type().is_file()
-            && entry
-                .path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case(extension))
-                .unwrap_or(false)
-        {
-            file_paths.push(entry.path().to_string_lossy().to_string());
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let is_match = entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case(extension))
+            .unwrap_or(false);
+        if is_match {
+            file_paths.push(entry.path().to_string_lossy().into_owned());
         }
     }
 
@@ -55,20 +58,25 @@ pub fn patch_swf(file: SwfBuf, width: f64, height: f64) -> Result<Vec<u8>> {
     Ok(out.into_inner())
 }
 
-pub fn find_real_size(buf: &SwfBuf) -> Result<(f64, f64)> {
-    let parsed = parse_swf(buf)?;
+pub fn find_real_size_from_bytes(data: &[u8]) -> Result<(f64, f64)> {
+    let buf = swf::decompress_swf(&mut Cursor::new(data))
+        .map_err(|e| anyhow::anyhow!("failed to decompress SWF: {e}"))?;
+    let parsed = parse_swf(&buf)?;
     let mut width = parsed.header.stage_size().x_max.to_pixels();
     let mut height = parsed.header.stage_size().y_max.to_pixels();
     for tag in &parsed.tags {
         if let Tag::DefineShape(shape) = tag {
             let b = shape.shape_bounds;
-            update_bounds(&mut width, &mut height, b);
+            width = width.max(b.x_max.to_pixels());
+            height = height.max(b.y_max.to_pixels());
         }
     }
-
     Ok((width, height))
 }
-fn update_bounds(max_x: &mut f64, max_y: &mut f64, rect: Rectangle<Twips>) {
-    *max_x = (*max_x).max(rect.x_max.to_pixels());
-    *max_y = (*max_y).max(rect.y_max.to_pixels());
+
+/// Frame count (u16) directly from raw FWS bytes.
+pub fn frame_count_from_fws(data: &[u8]) -> Result<u16> {
+    let buf = swf::decompress_swf(&mut Cursor::new(data))
+        .map_err(|e| anyhow::anyhow!("failed to decompress SWF: {e}"))?;
+    Ok(parse_swf(&buf)?.header.num_frames())
 }

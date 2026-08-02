@@ -18,35 +18,33 @@ fn get_wineprefix() -> PathBuf {
 pub fn setup_environment() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        Command::new("wine")
+        let status = Command::new("wine")
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map_err(|_| anyhow!("Wine not installed or not found in PATH"))?
-            .success()
-            .then_some(())
-            .ok_or_else(|| anyhow!("Wine not installed or not found in PATH"))?;
+            .map_err(|_| anyhow!("Wine not installed or not found in PATH"))?;
+
+        if !status.success() {
+            return Err(anyhow!("Wine not installed or not found in PATH"));
+        }
 
         let prefix = get_wineprefix();
         fs::create_dir_all(&prefix)?;
 
-        let status = Command::new("wineboot")
+        let _ = Command::new("wineboot")
+            .arg("--init")
             .env("WINEPREFIX", &prefix)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null())
-            .status()?;
-
-        if !status.success() {
-            return Err(anyhow!("wineboot failed with status {}", status));
-        }
+            .status();
     }
 
     Ok(())
 }
 
-pub fn get_roaming_path() -> Result<PathBuf> {
+pub fn get_temp_path() -> Result<PathBuf> {
     let username = env::var("USERNAME").or_else(|_| env::var("USER"))?;
 
     #[cfg(target_os = "linux")]
@@ -57,20 +55,13 @@ pub fn get_roaming_path() -> Result<PathBuf> {
             .join("users")
             .join(username)
             .join("AppData")
-            .join("Roaming"))
+            .join("Local")
+            .join("Temp"))
     }
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(appdata) = env::var("APPDATA") {
-            Ok(PathBuf::from(appdata))
-        } else {
-            Ok(PathBuf::from("C:/")
-                .join("Users")
-                .join(username)
-                .join("AppData")
-                .join("Roaming"))
-        }
+        Ok(std::env::temp_dir())
     }
 }
 

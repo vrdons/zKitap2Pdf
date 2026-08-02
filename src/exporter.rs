@@ -11,16 +11,9 @@ use ruffle_render_wgpu::{
 use std::{
     any::Any,
     panic::{AssertUnwindSafe, catch_unwind},
-    path::PathBuf,
+    path::Path,
     sync::Arc,
 };
-
-#[derive(Copy, Clone)]
-pub struct SizeOpt {
-    pub scale: f64,
-    pub width: u32,
-    pub height: u32,
-}
 
 pub struct ExporterOpt {
     pub graphics: GraphicsBackend,
@@ -34,40 +27,36 @@ pub struct Exporter {
 
 impl Exporter {
     pub fn new(opt: &ExporterOpt) -> Result<Self> {
+        let backend = opt.graphics.into();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: opt.graphics.into(),
+            backends: backend,
             ..Default::default()
         });
 
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
-            opt.graphics.into(),
+            backend,
             &instance,
             None,
             wgpu::PowerPreference::HighPerformance,
         ))
         .map_err(|e| anyhow!(e.to_string()))?;
 
-        let descriptors = Arc::new(Descriptors::new(instance, adapter, device, queue));
-
         Ok(Self {
-            descriptors,
+            descriptors: Arc::new(Descriptors::new(instance, adapter, device, queue)),
             scale: opt.scale,
         })
     }
 
-    pub fn capture_frames<F>(&self, path: &PathBuf, mut on_frame: F) -> Result<()>
+    pub fn capture_frames<F>(&self, path: &Path, mut on_frame: F) -> Result<()>
     where
         F: FnMut(u16, RgbaImage),
     {
         let movie = movie_from_path(path, None).map_err(|e| anyhow!(e.to_string()))?;
         let total_frames = movie.num_frames();
 
-        let width = movie.width().to_pixels();
-        let width = (width * self.scale).round() as u32;
-
-        let height = movie.height().to_pixels();
-        let height = (height * self.scale).round() as u32;
-        println!("Width: {} Height: {}", width, height);
+        let width = ((movie.width().to_pixels() * self.scale).round() as u32).max(1);
+        let height = ((movie.height().to_pixels() * self.scale).round() as u32).max(1);
+        println!("Width: {width} Height: {height}");
 
         let target = TextureTarget::new(&self.descriptors.device, (width, height))
             .map_err(|e| anyhow!(e.to_string()))?;
@@ -81,14 +70,12 @@ impl Exporter {
             .with_viewport_dimensions(width, height, self.scale)
             .build();
 
-        println!("Total Frames: {}", total_frames);
+        println!("Total Frames: {total_frames}");
 
         for i in 0..total_frames {
-            let capture_attempt: Result<Result<Option<RgbaImage>>, Box<dyn Any + Send>> = {
-                let mut locked_player = player
-                    .lock()
-                    .map_err(|e| anyhow!("Mutex poisoned: {}", e))?;
-
+            let capture_attempt = {
+                let mut locked_player =
+                    player.lock().map_err(|e| anyhow!("mutex poisoned: {e}"))?;
                 locked_player.preload(&mut ExecutionLimit::none());
                 locked_player.run_frame();
                 locked_player.render();
@@ -98,26 +85,18 @@ impl Exporter {
                         locked_player.renderer_mut(),
                     )
                     .ok_or_else(|| anyhow!("Renderer type mismatch"))?;
-
-                    let frame: Option<RgbaImage> = renderer.capture_frame();
-                    Ok(frame)
+                    Ok::<Option<RgbaImage>, anyhow::Error>(renderer.capture_frame())
                 }))
             };
 
             match capture_attempt {
                 Ok(Ok(Some(img))) => {
-                    println!("Frame {} captured.", i);
+                    println!("Frame {i} captured.");
                     on_frame(i, img);
                 }
-                Ok(Ok(None)) => {
-                    eprintln!("WARN: Frame {} captured an empty image.", i);
-                }
-                Ok(Err(e)) => {
-                    return Err(anyhow!("render/downcast error on frame {}: {:?}", i, e));
-                }
-                Err(e) => {
-                    return Err(anyhow!("Panicked on frame {}: {:?}", i, e));
-                }
+                Ok(Ok(None)) => eprintln!("WARN: Frame {i} captured an empty image."),
+                Ok(Err(e)) => return Err(anyhow!("Render/downcast error on frame {i}: {e:?}")),
+                Err(e) => return Err(anyhow!("Panicked on frame {i}: {e:?}")),
             }
         }
 

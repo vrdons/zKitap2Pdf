@@ -14,11 +14,15 @@ pub struct Args {
     pub output: Option<PathBuf>,
 
     /// Scale factor for the image (bigger = better quality)
-    #[clap(short = 's', long, default_value_t = 28 ,value_parser = clap::value_parser!(u64).range(10..=30))]
+    #[clap(short = 's', long, default_value_t = 28, value_parser = clap::value_parser!(u64).range(10..=30))]
     pub scale: u64,
 
     #[clap(long, short, default_value = "default")]
     pub graphics: GraphicsBackend,
+
+    /// Enable verbose Temp folder watching output
+    #[clap(long)]
+    pub debug: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -33,84 +37,82 @@ pub struct ValidatedArgs {
     pub files: Vec<Files>,
     pub scale: f64,
     pub graphics: GraphicsBackend,
+    pub debug: bool,
 }
 
 impl Args {
     pub fn validate(&self) -> anyhow::Result<ValidatedArgs> {
-        let mut list = Vec::new();
-
         if !self.input.exists() {
             anyhow::bail!("Input does not exist: {:?}", self.input);
         }
 
-        if self.input.is_dir() {
-            let files = crate::utils::find_files(self.input.clone().as_path(), "exe")?;
-            let output = self.output.clone().unwrap_or_else(|| PathBuf::from("out"));
-
-            if output.is_file() {
-                anyhow::bail!("Output path must be a directory, not a file: {:?}", output);
-            }
-
-            if !output.exists() {
-                std::fs::create_dir_all(&output)?;
-            }
-
-            if files.is_empty() {
-                anyhow::bail!("No .exe files found in input directory");
-            }
-
-            for file in files {
-                let input = std::fs::canonicalize(&file)?;
-                let filename = input
-                    .file_stem()
-                    .ok_or_else(|| anyhow::anyhow!("Input file has no valid name: {:?}", input))?
-                    .to_string_lossy()
-                    .to_string();
-
-                let output = output.join(format!("{}.pdf", filename));
-
-                list.push(Files {
-                    input,
-                    output,
-                    filename,
-                });
-            }
+        let files = if self.input.is_dir() {
+            self.collect_dir()?
         } else {
-            if self.input.extension().and_then(|e| e.to_str()) != Some("exe") {
-                anyhow::bail!(
-                    "Input must be a directory or an .exe file: {:?}",
-                    self.input
-                );
-            }
+            vec![self.collect_single()?]
+        };
 
-            let input = std::fs::canonicalize(&self.input)?;
-            let filename = input
-                .file_stem()
-                .ok_or_else(|| anyhow::anyhow!("Input file has no valid name: {:?}", input))?
-                .to_string_lossy()
-                .to_string();
-            let output = self
-                .output
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(format!("{}.pdf", filename)));
+        Ok(ValidatedArgs {
+            files,
+            scale: self.scale as f64 / 10.0,
+            graphics: self.graphics,
+            debug: self.debug,
+        })
+    }
 
-            if output.extension().and_then(OsStr::to_str) != Some("pdf") {
-                anyhow::bail!("Output file must be a PDF: {:?}", output);
-            }
+    fn collect_dir(&self) -> anyhow::Result<Vec<Files>> {
+        let found = crate::utils::find_files(&self.input, "exe")?;
+        let output = self.output.clone().unwrap_or_else(|| PathBuf::from("out"));
+        if output.is_file() {
+            anyhow::bail!("Output path must be a directory, not a file: {:?}", output);
+        }
+        if !output.exists() {
+            std::fs::create_dir_all(&output)?;
+        }
+        if found.is_empty() {
+            anyhow::bail!("No .exe files found in input directory");
+        }
 
+        let mut list = Vec::with_capacity(found.len());
+        for f in found {
+            let input = std::fs::canonicalize(&f)?;
+            let filename = file_stem_string(&input)?;
+            let output = output.join(format!("{filename}.pdf"));
             list.push(Files {
                 input,
                 output,
                 filename,
             });
         }
+        Ok(list)
+    }
 
-        let scale = self.scale as f64 / 10.0;
-
-        Ok(ValidatedArgs {
-            files: list,
-            scale,
-            graphics: self.graphics,
+    fn collect_single(&self) -> anyhow::Result<Files> {
+        if self.input.extension().and_then(|e| e.to_str()) != Some("exe") {
+            anyhow::bail!(
+                "Input must be a directory or an .exe file: {:?}",
+                self.input
+            );
+        }
+        let input = std::fs::canonicalize(&self.input)?;
+        let filename = file_stem_string(&input)?;
+        let output = self
+            .output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("{filename}.pdf")));
+        if output.extension().and_then(OsStr::to_str) != Some("pdf") {
+            anyhow::bail!("Output file must be a PDF: {:?}", output);
+        }
+        Ok(Files {
+            input,
+            output,
+            filename,
         })
     }
+}
+
+fn file_stem_string(path: &PathBuf) -> anyhow::Result<String> {
+    path.file_stem()
+        .ok_or_else(|| anyhow::anyhow!("Input file has no valid name: {:?}", path))
+        .map(|s| s.to_string_lossy().into_owned())
 }

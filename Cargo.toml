@@ -3,13 +3,13 @@ name = "zKitap2Pdf"
 version = "0.1.4"
 edition = "2024"
 description = "zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle"
-authors = ["vrdons <vrdons@proton.me>", "ErenayDev <erenaydev@proton.me>"]
+authors = ["Vrdons <vrdons@proton.me>", "ErenayDev <erenaydev@proton.me>"]
 license = "MIT"
 repository = "https://github.com/vrdons/zKitap2Pdf"
 homepage = "https://github.com/vrdons/zKitap2Pdf"
 readme = "README.md"
-keywords = ["zKitap", "sfw", "flash", "ruffle", "zKitap2Pdf"]
-rust-version = "1.87"
+keywords = ["zKitap", "pdf", "ruffle", "zKitap2Pdf"]
+rust-version = "1.88"
 exclude = [
     "target/",
     ".git/",
@@ -22,17 +22,31 @@ exclude = [
 ]
 
 [dependencies]
-anyhow = "1.0.100"
-clap = { version ="4.5.53", features = ["derive"] }
-image = { version = "0.25.9", features=["png", "jpeg"] }
+anyhow = "1.0.101"
+clap = { version = "4.5.58", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 notify = "8.2.0"
 walkdir = "2.5.0"
-swf = { git = "https://github.com/ruffle-rs/ruffle.git", package="swf", rev = "5939da66c31f012158fbd29c612302e6742753c8" }
-ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package="ruffle_core", features = ["deterministic", "default_font"], rev = "5939da66c31f012158fbd29c612302e6742753c8" }
-ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package="ruffle_render_wgpu", features = ["clap"], rev = "5939da66c31f012158fbd29c612302e6742753c8" }
-futures = "0.3.31"
-oxidize-pdf = "1.6.7"
-tempfile = "3.23.0"
+swf = { git = "https://github.com/ruffle-rs/ruffle.git", package = "swf", rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
+ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_core", features = ["deterministic", "default_font"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
+ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render_wgpu", features = ["clap"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
+futures = "0.3.32"
+oxidize-pdf = "2.12.0"
+tempfile = "3.25.0"
+base64 = "0.23.0"
+hex = "0.4.3"
+blowfish = "0.10.0"
+cipher = "0.5.2"
+flate2 = "1.0.35"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-{ version }{ archive-suffix }"
@@ -49,8 +63,8 @@ zKitap2Pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf forma
 license = "MIT"
 
 [package.metadata.deb]
-maintainer = "ErenayDev <erenaydev@proton.me>"
-copyright = "2025, ErenayDev <erenaydev@proton.me>"
+maintainer = "Vrdons <vrodns@proton.me>"
+copyright = "2026, Vrdons <vrdons@proton.me>"
 extended-description = """
 zKitap2Pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle
 """

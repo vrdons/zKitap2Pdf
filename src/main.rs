@@ -1,13 +1,18 @@
 use std::time::Duration;
 
-use crate::{cli::Args, executable::setup_environment, export::HandleArgs};
+use crate::cli::Args;
+use crate::executable::setup_environment;
+use crate::export::HandleArgs;
 
 use clap::Parser;
 
 pub mod cli;
+pub mod decrypt;
 pub mod executable;
 pub mod export;
 pub mod exporter;
+pub mod fernus_assets;
+pub mod pe_scanner;
 pub mod utils;
 
 fn main() -> anyhow::Result<()> {
@@ -16,16 +21,18 @@ fn main() -> anyhow::Result<()> {
         graphics: args.graphics,
         scale: args.scale,
     })?;
+    println!("-- Setting up environment, this may take a while...");
     setup_environment()?;
     let mut errors = Vec::new();
 
     for file in &args.files {
-        println!("Processing : {:?}", file.input);
+        println!("Processing: {:?}", file.input);
         if let Err(e) = export::handle_exe(
             &exporter,
-            HandleArgs {
+            &HandleArgs {
                 file: file.clone(),
                 scale: args.scale,
+                debug: args.debug,
             },
         ) {
             println!("An error occurred: {:?}", e);
