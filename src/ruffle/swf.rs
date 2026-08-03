@@ -64,6 +64,16 @@ pub struct SwfView {
     pub frame_count: u16,
 }
 
+/// Decompress a SWF buffer without scanning for shape dimensions.
+///
+/// This is a fast-path for when the caller already knows the correct
+/// width/height (e.g. from FRNS frame metadata).
+pub fn decompress_swf_quick(data: &[u8]) -> Result<SwfBuf> {
+    swf::decompress_swf(&mut Cursor::new(data))
+        .map_err(|e| anyhow!("failed to decompress SWF: {e}"))
+        .context("swf decompress quick")
+}
+
 /// Decompress the SWF and extract its metadata plus the reusable buffer.
 ///
 /// The returned [`SwfBuf`] can be passed straight to [`patch`].

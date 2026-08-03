@@ -52,18 +52,18 @@ fn handle_event(
         };
         let mut in_process = false;
 
-        if name.ends_with(".dll") {
+        if (name.ends_with(".dll") || name.ends_with(".frns") || name.ends_with(".kxk")) &&
+         event.kind == EventKind::Access(AccessKind::Close(AccessMode::Write)) {
             in_process = true;
-        }
-        if !in_process {
-            continue;
-        }
-
-        if event.kind != EventKind::Access(AccessKind::Close(AccessMode::Write)) {
-            continue;
         }
 
         let owned = name.to_string();
+
+        //tracing::trace!(name = %owned, action = ?event.kind);
+
+        if !in_process {
+            continue;
+        }
 
         match fs::read(path) {
             Ok(data) => {
@@ -76,7 +76,9 @@ fn handle_event(
                 *last_activity = Instant::now();
             }
             Err(e) => {
-                tracing::debug!(error = %e, name = %owned, "temp read failed");
+                if !dlls.contains_key(&owned) {
+                    tracing::debug!(error = %e, name = %owned, "temp read failed");
+                }
             }
         }
     }

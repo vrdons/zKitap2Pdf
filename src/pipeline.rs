@@ -1,17 +1,16 @@
-//! Conversion pipeline orchestration (was `handle_exe` in `export.rs`).
+//! Conversion pipeline orchestration.
 //!
-//! Per-EXE flow:
-//!   1. Launch the projector (`process::execute_exe`) and watch its `%TEMP%`
-//!      drop dir (`watcher::watch_and_collect`).
-//!   2. Resolve the KryCode from the publisher payload, falling back to the
-//!      verified default for Isler-4065.
-//!   3. Decrypt each runtime DLL (`sysb`/`sysm`/`sysd`) trying KrySWFCrypto
-//!      first, then KK::fd1; normalise to FWS and write to a temp directory.
-//!   4. Hand the temp SWF paths to `render::render`, which drives the
-//!      threaded Ruffle frame capture and assembles the PDF.
+//! Supports two Fernus formats transparently:
 //!
-//! `sysb` is sorted first because it carries the actual page content; masks
-//! and config must follow so the page order in the PDF stays stable.
+//! **V1 (.dll):** Each DLL is one multi-frame SWF, decrypted via KrySWFCrypto
+//!   or KK::fd1.
+//!
+//! **V2 (.frns):** Flash-LZMA-compressed JSON containing per-frame encrypted
+//!   SWF data. Each frame is independently XOR-decoded, base64-decoded, then
+//!   KrySWFCrypto-decrypted into a single-frame CWS SWF.
+//!
+//! KryCode is resolved from `sysd.frns` / `sysd.dll` / `publisher.kxk`,
+//! falling back to the verified `{33, 20, 10}` default.
 
 use std::collections::HashMap;
 use std::fs;
@@ -23,68 +22,73 @@ use tempfile::TempDir;
 use crate::cli::Files;
 use crate::fernus::assets::PublisherConfig;
 use crate::fernus::crypto::{DEFAULT_KRY_CODE, DEFAULT_PUBLISHER_KEY, KK, KryCode, KrySWFCrypto};
+use crate::fernus::frns::{self, DecryptedFrame};
 use crate::ruffle::exporter::Exporter;
 use crate::ruffle::render::{SwfInput, render as render_pdf};
 use crate::ruffle::swf;
-use crate::utils::process;
-use crate::utils::watcher;
+use crate::utils::{self, process, watcher};
 
-/// Process one EXE end-to-end: decrypt runtime assets and render the PDF.
+/// Process one EXE end-to-end.
 pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
-    // Launch the projector. Its runtime drops sys*.dll + p.dll into %TEMP%.
-    // NOTE: the wine-launched process spawns grandchildren we cannot reliably
-    // track, so we deliberately leak the `Child` handle and let the user kill
-    // the projector themselves. See analyzes/v1.md §4.1 for context.
     let _child = process::execute_exe(&file.input)?;
 
     let temp_path = process::temp_path()?;
     tracing::debug!(temp = %temp_path.display(), "watching %TEMP%");
 
-    let dlls = watcher::watch_and_collect(&temp_path)?;
-    tracing::debug!(count = dlls.len(), keys = ?dlls.keys().collect::<Vec<_>>(), "collected");
+    let payloads = watcher::watch_and_collect(&temp_path)?;
+    tracing::debug!(count = payloads.len(), keys = ?payloads.keys().collect::<Vec<_>>(), "collected");
 
-    if dlls.is_empty() {
-        return Err(anyhow!("No DLLs found in Temp"));
+    if payloads.is_empty() {
+        return Err(anyhow!("No payload files found in Temp"));
     }
-    tracing::info!(key = DEFAULT_PUBLISHER_KEY, "publisher");
 
-    let kry_code = resolve_kry_code(&dlls, DEFAULT_PUBLISHER_KEY);
+    // Resolve KryCode from whatever config source is available
+    let kry_code = resolve_kry_code(&payloads);
     tracing::debug!(code = ?kry_code, "KryCode resolved");
 
-    // Decrypt each DLL → patch SWF → write to temp file immediately, so we
-    // never hold all decrypted SWFs in RAM at once.
     let swf_tmp = TempDir::new().context("create swf temp dir")?;
     let mut swf_inputs: Vec<SwfInput> = Vec::new();
 
-    tracing::info!("starting decrypt");
-    for (name, data) in &dlls {
-        if name == "p.dll" {
-            //TODO: Make it actually decrypt
+    for (name, data) in &payloads {
+        // Skip config files — they're only for KryCode resolution
+        // Sysm.frns is mask
+        if name == "p.dll" || name == "sysd.dll" || name == "sysd.frns" || name == "sysm.frns" || name == "publisher.kxk" {
             continue;
         }
-        tracing::debug!(name = %name, bytes = data.len(), "decrypting");
 
-        let fws = if let Some(fws) = try_decrypt_kry(data, &kry_code) {
-            tracing::debug!(name = %name, kind = "kry", size = fws.len(), "decrypt ok");
-            fws
-        } else if let Some(fws) = try_decrypt_fd1(data, DEFAULT_PUBLISHER_KEY) {
-            tracing::debug!(name = %name, kind = "fd1", size = fws.len(), "decrypt ok");
-            fws
+        tracing::info!(name = %name, bytes = data.len(), "decrypting");
+
+        if name.ends_with(".frns") {
+            // --- V2: per-frame FRNS bundle ---
+            let frames = match frns::load_and_decrypt_book(data, &kry_code) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::error!(name = %name, error = %e, "frns decrypt failed");
+                    continue;
+                }
+            };
+            tracing::info!(name = %name, frame_count = frames.len(), "frns decrypted");
+            for frame in &frames {
+                if let Some(input) = write_frame_swf(&swf_tmp, name, frame) {
+                    swf_inputs.push(input);
+                }
+            }
         } else {
-            tracing::debug!(
-                name = %name,
-                len = data.len(),
-                head = ?hex::encode(&data[..data.len().min(16)]),
-                "decrypt failed"
-            );
-            continue;
-        };
-
-        // Patch and write to temp file immediately; drop decrypted bytes.
-        let swf_path = swf_tmp.path().join(name);
-        match write_patched_swf(&fws, &swf_path) {
-            Ok(input) => swf_inputs.push(input),
-            Err(e) => tracing::warn!(name = %name, error = %e, "skip — patch/write failed"),
+            // --- V1: legacy DLL → one multi-frame SWF ---
+            let fws = match try_decrypt_kry(data, &kry_code)
+                .or_else(|| try_decrypt_fd1(data, DEFAULT_PUBLISHER_KEY))
+            {
+                Some(f) => f,
+                None => {
+                    tracing::debug!(name = %name, len = data.len(), head = ?hex::encode(&data[..data.len().min(16)]), "decrypt failed");
+                    continue;
+                }
+            };
+            let swf_path = swf_tmp.path().join(name);
+            match write_patched_swf(&fws, &swf_path, 0.0, 0.0) {
+                Ok(input) => swf_inputs.push(input),
+                Err(e) => tracing::warn!(name = %name, error = %e, "patch/write failed"),
+            }
         }
     }
 
@@ -92,101 +96,110 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
         return Err(anyhow!("No decryptable SWF payloads found"));
     }
 
-    // sysb holds the page content; sort it first so PDF page order is stable.
     swf_inputs.sort_by_key(|input| !input.name.contains("sysb"));
-
     render_pdf(exporter, &swf_inputs, file, scale)
 }
 
-/// Decompress + patch a decrypted FWS, write it to `dest`, and return the
-/// metadata needed by the renderer.
-fn write_patched_swf(fws_bytes: &[u8], dest: &PathBuf) -> Result<SwfInput> {
-    let (swf_buf, view) = swf::load(fws_bytes)?;
-    let patched = swf::patch(swf_buf, view.width, view.height)?;
-    let name = dest
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown.swf")
-        .to_string();
-    fs::write(dest, &patched)?;
-    Ok(SwfInput {
-        name,
-        path: dest.clone(),
-        width: view.width,
-        height: view.height,
-    })
+// ---------------------------------------------------------------------------
+// KryCode resolution (unified — probes all known config sources)
+// ---------------------------------------------------------------------------
+
+fn resolve_kry_code(payloads: &HashMap<String, Vec<u8>>) -> KryCode {
+    let key = DEFAULT_PUBLISHER_KEY;
+
+    // Ordered probes: sysd.frns → sysd.dll → publisher.kxk → default
+    for config_name in &["sysd.frns", "sysd.dll", "publisher.kxk"] {
+        let Some(data) = payloads.get(*config_name) else { continue };
+
+        let text = String::from_utf8_lossy(data);
+        let Ok(decrypted) = KK::fd1(text.trim(), key, true) else {
+            tracing::debug!(source = config_name, "fd1 decrypt failed");
+            continue;
+        };
+
+        // Try JSON (publisher.kxk / newer sysd)
+        if let Ok(cfg) = serde_json::from_str::<PublisherConfig>(&decrypted) {
+            let code = cfg.kry_code();
+            tracing::debug!(code = ?code, source = config_name, "KryCode resolved");
+            return code;
+        }
+
+        // Try XML (older sysd.frns / sysd.dll)
+        if let Some(code) = extract_kry_code_from_xml(&decrypted) {
+            tracing::debug!(code = ?code, source = config_name, "KryCode from XML");
+            return code;
+        }
+
+        tracing::debug!(source = config_name, "fd1 ok but not valid JSON/XML");
+    }
+
+    tracing::debug!(code = ?DEFAULT_KRY_CODE, "using default KryCode");
+    DEFAULT_KRY_CODE
 }
 
-/// Resolve the KryCode for this book from its publisher payload, falling back
-/// to the verified Isler-4065 default when the payload is absent or malformed.
-fn resolve_kry_code(dlls: &HashMap<String, Vec<u8>>, key: &str) -> KryCode {
-    dlls.get("sysd.dll")
-        .and_then(|data| {
-            let text = String::from_utf8_lossy(data);
-            KK::fd1(text.trim(), key, true).ok()
-        })
-        .and_then(|decrypted| serde_json::from_str::<PublisherConfig>(&decrypted).ok())
-        .map(|cfg| cfg.kry_code())
-        .unwrap_or(DEFAULT_KRY_CODE)
+fn extract_kry_code_from_xml(xml: &str) -> Option<KryCode> {
+    let fernus_code = utils::xml_tag(xml, "fernusCode")?;
+    let pkxkname = utils::xml_tag(xml, "pkxkname").unwrap_or("fernus");
+    crate::fernus::crypto::parse_kry_code(fernus_code, pkxkname.len()).ok()
 }
 
-/// Attempt KrySWFCrypto byte-scramble decryption, then normalise to FWS.
-fn try_decrypt_kry(data: &[u8], code: &KryCode) -> Option<Vec<u8>> {
-    if data.is_empty() {
-        tracing::debug!("kry: empty input, skipping");
-        return None;
-    }
-    let mut bytes = data.to_vec();
-    match KrySWFCrypto::decrypt(&mut bytes, code) {
-        Ok(()) => {
-            tracing::debug!(len = bytes.len(), head = ?hex::encode(&bytes[..bytes.len().min(16)]), "kry: decrypt ok");
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "kry: decrypt failed");
-            return None;
-        }
-    }
-    match swf::to_fws(&bytes) {
-        Ok(fws) => {
-            tracing::debug!(len = fws.len(), "kry: to_fws ok");
-            Some(fws)
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "kry: to_fws failed");
-            None
-        }
-    }
-}
 
-/// Attempt KK::fd1 string decryption, then normalise to FWS.
-fn try_decrypt_fd1(data: &[u8], key: &str) -> Option<Vec<u8>> {
-    if data.is_empty() {
-        tracing::debug!("fd1: empty input, skipping");
-        return None;
-    }
-    let text = String::from_utf8_lossy(data);
-    let decrypted = match KK::fd1(text.trim(), key, true) {
-        Ok(d) => {
-            tracing::debug!(
-                len = d.len(),
-                head = &d[..d.len().min(64)],
-                "fd1: decrypt ok"
-            );
-            d
-        }
+// ---------------------------------------------------------------------------
+// SWF writing helpers
+// ---------------------------------------------------------------------------
+
+fn write_frame_swf(swf_tmp: &TempDir, bundle_name: &str, frame: &DecryptedFrame) -> Option<SwfInput> {
+    let fws = match swf::to_fws(&frame.swf_bytes) {
+        Ok(f) => f,
         Err(e) => {
-            tracing::debug!(error = %e, "fd1: decrypt failed");
-            return None;
+            tracing::warn!(name = %bundle_name, frame = frame.frame, error = %e, "to_fws failed, using raw");
+            frame.swf_bytes.clone()
         }
     };
-    match swf::to_fws(decrypted.as_bytes()) {
-        Ok(fws) => {
-            tracing::debug!(len = fws.len(), "fd1: to_fws ok");
-            Some(fws)
+
+    let swf_name = format!("{bundle_name}_frame{:04}.swf", frame.frame);
+    let dest = swf_tmp.path().join(&swf_name);
+
+    let result = write_patched_swf(&fws, &dest, frame.width, frame.height);
+
+    match result {
+        Ok(input) => {
+            tracing::debug!(name = %swf_name, "frame written");
+            Some(input)
         }
         Err(e) => {
-            tracing::debug!(error = %e, "fd1: to_fws failed");
+            tracing::warn!(name = %bundle_name, frame = frame.frame, error = %e, "patch/write failed");
             None
         }
     }
+}
+
+fn write_patched_swf(fws_bytes: &[u8], dest: &PathBuf, width: f64, height: f64) -> Result<SwfInput> {
+    // If dims provided by caller (e.g. FRNS metadata), use fast path.
+    // Otherwise scan DefineShape bounds.
+    let (w, h) = if width > 0.0 && height > 0.0 {
+        (width, height)
+    } else {
+        let (_, view) = swf::load(fws_bytes)?;
+        (view.width, view.height)
+    };
+    let swf_buf = swf::decompress_swf_quick(fws_bytes)?;
+    let patched = swf::patch(swf_buf, w, h)?;
+    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("unknown.swf").to_string();
+    fs::write(dest, &patched)?;
+    Ok(SwfInput { name, path: dest.clone(), width: w, height: h })
+}
+
+fn try_decrypt_kry(data: &[u8], code: &KryCode) -> Option<Vec<u8>> {
+    if data.is_empty() { return None; }
+    let mut bytes = data.to_vec();
+    KrySWFCrypto::decrypt(&mut bytes, code).ok()?;
+    swf::to_fws(&bytes).ok()
+}
+
+fn try_decrypt_fd1(data: &[u8], key: &str) -> Option<Vec<u8>> {
+    if data.is_empty() { return None; }
+    let text = String::from_utf8_lossy(data);
+    let decrypted = KK::fd1(text.trim(), key, true).ok()?;
+    swf::to_fws(decrypted.as_bytes()).ok()
 }

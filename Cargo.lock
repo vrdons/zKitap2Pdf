@@ -3903,6 +3903,7 @@ dependencies = [
  "futures",
  "hex",
  "image",
+ "lzma-rs",
  "notify",
  "oxidize-pdf",
  "ruffle_core",

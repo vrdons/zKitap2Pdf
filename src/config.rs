@@ -17,7 +17,7 @@ pub const WINE_MISSING: &str = "Wine not installed or not found in PATH";
 /// `POLL_INTERVAL` — how often the watcher channel is drained.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(120);
-pub const POLL_INTERVAL: Duration = Duration::from_millis(300);
+pub const POLL_INTERVAL: Duration = Duration::from_millis(900);
 
 /// Author string embedded in every generated PDF.
 pub const PDF_AUTHOR: &str = "Vrdons <vrdons@proton.me>";
