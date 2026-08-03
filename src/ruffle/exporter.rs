@@ -49,7 +49,7 @@ impl Exporter {
     }
 
     /// Spawn WGPU rendering in a background thread; receive frames through a
-    /// bounded channel (capacity 8 ≈ max ~112 MB) so the render thread can
+    /// bounded channel (capacity 16 ≈ max ~224 MB) so the render thread can
     /// keep working ahead even when the main thread is busy encoding/PDF-ing
     /// earlier SWFs.
     pub fn capture_frames_threaded(
@@ -57,7 +57,7 @@ impl Exporter {
         path: &Path,
         thread_id: u32,
     ) -> Result<(thread::JoinHandle<()>, mpsc::Receiver<Result<(u16, RgbaImage)>>)> {
-        let (tx, rx) = mpsc::sync_channel::<Result<(u16, RgbaImage)>>(8);
+        let (tx, rx) = mpsc::sync_channel::<Result<(u16, RgbaImage)>>(16);
         let descriptors = self.descriptors.clone();
         let scale = self.scale;
         let path_buf = path.to_path_buf();
