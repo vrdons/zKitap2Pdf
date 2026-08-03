@@ -19,22 +19,6 @@ use super::crypto::{KryCode, KrySWFCrypto};
 /// Minimum bytes for a Flash LZMA header.
 const LZMA_HEADER_SIZE: usize = 13;
 
-/// Check whether `data` looks like Flash-LZMA-compressed content.
-///
-/// The first byte encodes `lc`, `lp`, `pb` properties.  Valid ranges are
-/// `lc ≤ 8, lp ≤ 4, pb ≤ 4`, which gives us a reliable heuristic.
-pub fn is_lzma_compressed(data: &[u8]) -> bool {
-    if data.len() < LZMA_HEADER_SIZE {
-        return false;
-    }
-    let props = data[0];
-    let lc = props % 9;
-    let remaining = props / 9;
-    let lp = remaining % 5;
-    let pb = remaining / 5;
-    lc <= 8 && lp <= 4 && pb <= 4
-}
-
 /// Decompress a Flash LZMA stream (13-byte header + raw LZMA1 payload).
 pub fn decompress_flash_lzma(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < LZMA_HEADER_SIZE {

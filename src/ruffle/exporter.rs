@@ -145,10 +145,6 @@ fn render_frames(
 
     tracing::info!(total_frames, "capturing frames");
 
-    let mut exec_limit = ExecutionLimit::new();
-    exec_limit.max_actions_per_frame = 200_000;
-    exec_limit.max_recursion_depth = 64;
-
     for i in 0..total_frames {
         tracing::info!(frame = i + 1, total = total_frames, "running frame");
         let capture_attempt = {
@@ -159,7 +155,7 @@ fn render_frames(
                     return;
                 }
             };
-            locked_player.preload(&mut exec_limit.clone());
+            locked_player.preload(&mut ExecutionLimit::none());
             locked_player.run_frame();
             locked_player.render();
 
