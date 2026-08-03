@@ -6,22 +6,25 @@
 //!   2. Resolve the KryCode from the publisher payload, falling back to the
 //!      verified default for Isler-4065.
 //!   3. Decrypt each runtime DLL (`sysb`/`sysm`/`sysd`) trying KrySWFCrypto
-//!      first, then KK::fd1; normalise to FWS.
-//!   4. Hand the decrypted SWF batches to `render::render`, which drives the
-//!      Ruffle frame capture and assembles the PDF.
+//!      first, then KK::fd1; normalise to FWS and write to a temp directory.
+//!   4. Hand the temp SWF paths to `render::render`, which drives the
+//!      threaded Ruffle frame capture and assembles the PDF.
 //!
 //! `sysb` is sorted first because it carries the actual page content; masks
 //! and config must follow so the page order in the PDF stays stable.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use tempfile::TempDir;
 
 use crate::cli::Files;
 use crate::fernus::assets::PublisherConfig;
 use crate::fernus::crypto::{DEFAULT_KRY_CODE, DEFAULT_PUBLISHER_KEY, KK, KryCode, KrySWFCrypto};
 use crate::ruffle::exporter::Exporter;
-use crate::ruffle::render::render as render_pdf;
+use crate::ruffle::render::{SwfInput, render as render_pdf};
 use crate::ruffle::swf;
 use crate::utils::process;
 use crate::utils::watcher;
@@ -48,8 +51,12 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
     let kry_code = resolve_kry_code(&dlls, DEFAULT_PUBLISHER_KEY);
     tracing::debug!(code = ?kry_code, "KryCode resolved");
 
+    // Decrypt each DLL → patch SWF → write to temp file immediately, so we
+    // never hold all decrypted SWFs in RAM at once.
+    let swf_tmp = TempDir::new().context("create swf temp dir")?;
+    let mut swf_inputs: Vec<SwfInput> = Vec::new();
+
     tracing::info!("starting decrypt");
-    let mut swf_data: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, data) in &dlls {
         if name == "p.dll" {
             //TODO: Make it actually decrypt
@@ -57,32 +64,57 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
         }
         tracing::debug!(name = %name, bytes = data.len(), "decrypting");
 
-        if let Some(fws) = try_decrypt_kry(data, &kry_code) {
-            tracing::debug!(name = %name, kind = "fws", size = fws.len(), "decrypt ok");
-            swf_data.push((name.clone(), fws));
-            continue;
-        }
-        if let Some(fws) = try_decrypt_fd1(data, DEFAULT_PUBLISHER_KEY) {
+        let fws = if let Some(fws) = try_decrypt_kry(data, &kry_code) {
+            tracing::debug!(name = %name, kind = "kry", size = fws.len(), "decrypt ok");
+            fws
+        } else if let Some(fws) = try_decrypt_fd1(data, DEFAULT_PUBLISHER_KEY) {
             tracing::debug!(name = %name, kind = "fd1", size = fws.len(), "decrypt ok");
-            swf_data.push((name.clone(), fws));
+            fws
+        } else {
+            tracing::debug!(
+                name = %name,
+                len = data.len(),
+                head = ?hex::encode(&data[..data.len().min(16)]),
+                "decrypt failed"
+            );
             continue;
+        };
+
+        // Patch and write to temp file immediately; drop decrypted bytes.
+        let swf_path = swf_tmp.path().join(name);
+        match write_patched_swf(&fws, &swf_path) {
+            Ok(input) => swf_inputs.push(input),
+            Err(e) => tracing::warn!(name = %name, error = %e, "skip — patch/write failed"),
         }
-        tracing::debug!(
-            name = %name,
-            len = data.len(),
-            head = ?hex::encode(&data[..data.len().min(16)]),
-            "decrypt failed"
-        );
     }
 
-    if swf_data.is_empty() {
+    if swf_inputs.is_empty() {
         return Err(anyhow!("No decryptable SWF payloads found"));
     }
 
     // sysb holds the page content; sort it first so PDF page order is stable.
-    swf_data.sort_by_key(|(name, _)| !name.contains("sysb"));
+    swf_inputs.sort_by_key(|input| !input.name.contains("sysb"));
 
-    render_pdf(exporter, &swf_data, file, scale)
+    render_pdf(exporter, &swf_inputs, file, scale)
+}
+
+/// Decompress + patch a decrypted FWS, write it to `dest`, and return the
+/// metadata needed by the renderer.
+fn write_patched_swf(fws_bytes: &[u8], dest: &PathBuf) -> Result<SwfInput> {
+    let (swf_buf, view) = swf::load(fws_bytes)?;
+    let patched = swf::patch(swf_buf, view.width, view.height)?;
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown.swf")
+        .to_string();
+    fs::write(dest, &patched)?;
+    Ok(SwfInput {
+        name,
+        path: dest.clone(),
+        width: view.width,
+        height: view.height,
+    })
 }
 
 /// Resolve the KryCode for this book from its publisher payload, falling back

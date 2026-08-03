@@ -1,22 +1,51 @@
-//! SWF → PDF rendering: drives Ruffle's frame capture and assembles the PDF.
-
+//! SWF → PDF rendering: receives patched SWF file paths from the pipeline,
+//! spawns all render threads in parallel, then drains frames by SWF order
+//! (sysb → sysm → ...) so JPEG page order is correct.
 use std::fs;
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread::JoinHandle;
 
-use anyhow::{Context, Result};
-use image::{DynamicImage, ImageFormat};
+use anyhow::{Context, Result, anyhow};
+use image::{DynamicImage, ImageFormat, RgbaImage};
 use oxidize_pdf::{Document, Image, Page};
-use tempfile::NamedTempFile;
+use tempfile::TempDir;
 
 use crate::cli::Files;
 use crate::config::PDF_AUTHOR;
 use crate::ruffle::exporter::Exporter;
-use crate::ruffle::swf;
 
-/// Render the supplied (name, fws-bytes) SWF batches into a single PDF.
+/// A render job spawned in a background thread.
+struct RenderJob {
+    pub name: String,
+    pub handle: JoinHandle<()>,
+    pub rx: mpsc::Receiver<Result<(u16, RgbaImage)>>,
+    pub scaled_width: f64,
+    pub scaled_height: f64,
+}
+
+/// Metadata for a single patched SWF ready to render.
+pub struct SwfInput {
+    /// Display name (e.g. "sysb.dll").
+    pub name: String,
+    /// Path to the patched FWS file on disk.
+    pub path: PathBuf,
+    /// Real pixel width (after patch).
+    pub width: f64,
+    /// Real pixel height (after patch).
+    pub height: f64,
+}
+
+/// Render the supplied patched SWF files into a single PDF.
+///
+/// All render threads are spawned **in parallel** (so WGPU can pipeline work
+/// across SWFs), then the main thread drains each channel in the original
+/// `swf_inputs` order.  Because `swf_inputs` is sorted sysb-first, pages
+/// from the content SWF always precede mask pages in the PDF.
 pub fn render(
     exporter: &Exporter,
-    swf_data: &[(String, Vec<u8>)],
+    swf_inputs: &[SwfInput],
     file_info: &Files,
     scale: f64,
 ) -> Result<()> {
@@ -24,49 +53,73 @@ pub fn render(
     doc.set_title(&file_info.filename);
     doc.set_author(PDF_AUTHOR);
 
-    // One reusable JPEG scratch file across all pages — overwritten per frame.
-    let mut jpeg_file = NamedTempFile::new().context("create jpeg scratch file")?;
-    let mut total_pages = 0u32;
+    let tmp = TempDir::new().context("create render temp dir")?;
+    let mut jpg_seq: u64 = 0;
 
-    for (idx, (name, fws_bytes)) in swf_data.iter().enumerate() {
-        // Single decompress per SWF: load() returns both the buffer (for patch)
-        // and the metadata (size + frame count).
-        let (swf_buf, view) = swf::load(fws_bytes).with_context(|| format!("analysing {name}"))?;
-        let patched = swf::patch(swf_buf, view.width, view.height)?;
+    // -----------------------------------------------------------------
+    // Phase 1 — spawn all render threads at once (parallel GPU work)
+    // -----------------------------------------------------------------
+    let mut jobs: Vec<RenderJob> = Vec::with_capacity(swf_inputs.len());
+    for (idx, input) in swf_inputs.iter().enumerate() {
+        let scaled_width = (input.width * scale).round();
+        let scaled_height = (input.height * scale).round();
 
-        let patched_file = NamedTempFile::new().context("create patched swf scratch file")?;
-        fs::write(patched_file.path(), &patched)
-            .with_context(|| format!("writing patched swf {name}"))?;
-
-        let scaled_width = (view.width * scale).round();
-        let scaled_height = (view.height * scale).round();
-        let frame_count = view.frame_count as u32;
         tracing::info!(
             index = idx + 1,
-            total = swf_data.len(),
-            swf = %name,
+            total = swf_inputs.len(),
+            swf = %input.name,
             scale = format!("{scaled_width:.0}x{scaled_height:.0}"),
-            frames = frame_count,
             "processing"
         );
 
-        let mut rendered = 0u32;
-        exporter.capture_frames(patched_file.path(), |_frame_idx, image| match capture_page(
-            &image,
-            &mut jpeg_file,
-            &mut doc,
+        let thread_id = idx as u32 + 1;
+        let (handle, rx) = exporter
+            .capture_frames_threaded(&input.path, thread_id)
+            .with_context(|| format!("spawning render thread for {}", input.name))?;
+
+        jobs.push(RenderJob {
+            name: input.name.clone(),
+            handle,
+            rx,
             scaled_width,
             scaled_height,
-        ) {
-            Ok(()) => rendered += 1,
-            Err(e) => tracing::warn!(frame = rendered + 1, error = %e, "page dropped"),
-        })?;
-
-        total_pages += rendered;
-        tracing::info!(pages = rendered, swf = %name, "captured");
+        });
     }
 
-    drop(jpeg_file);
+    // -----------------------------------------------------------------
+    // Phase 2 — drain channels in order → JPEG → PDF pages
+    // -----------------------------------------------------------------
+    let mut total_pages = 0u32;
+    for job in jobs {
+        let scaled_width = job.scaled_width;
+        let scaled_height = job.scaled_height;
+
+        let mut rendered = 0u32;
+        for received in job.rx {
+            match received {
+                Ok((_frame_idx, rgba)) => {
+                    let jpg_path = tmp.path().join(format!("p_{:08}.jpg", jpg_seq));
+                    jpg_seq += 1;
+                    save_jpeg(&rgba, &jpg_path)?;
+                    drop(rgba);
+                    add_pdf_page(&mut doc, &jpg_path, scaled_width, scaled_height)?;
+                    rendered += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(swf = %job.name, error = %e, "frame dropped");
+                }
+            }
+        }
+
+        // Join the thread — it should already be finished by the time the
+        // channel is exhausted, but we wait here for correctness.
+        job.handle
+            .join()
+            .map_err(|e| anyhow!("render thread '{}' panicked: {e:?}", job.name))?;
+
+        total_pages += rendered;
+        tracing::info!(pages = rendered, swf = %job.name, "captured");
+    }
 
     tracing::info!(pages = total_pages, "finished");
     tracing::info!(output = %file_info.output.display(), "writing PDF");
@@ -81,32 +134,22 @@ pub fn render(
     Ok(())
 }
 
-/// Encode one RGBA frame as JPEG into the scratch file and append a PDF page.
-fn capture_page(
-    image: &image::RgbaImage,
-    jpeg_file: &mut NamedTempFile,
-    doc: &mut Document,
-    width: f64,
-    height: f64,
-) -> Result<()> {
-    let rgb = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
-
-    let mut jpeg_buf = Cursor::new(Vec::with_capacity(rgb.len() / 3));
-    rgb.write_to(&mut jpeg_buf, ImageFormat::Jpeg)
+/// Encode a single RGBA frame as a JPEG file on disk.
+fn save_jpeg(rgba: &image::RgbaImage, path: &Path) -> Result<()> {
+    let rgb = DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
+    let file = fs::File::create(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    rgb.write_to(&mut writer, ImageFormat::Jpeg)
         .context("encode JPEG")?;
-    let jpeg_bytes = jpeg_buf.into_inner();
+    writer.flush().context("flush JPEG")?;
+    Ok(())
+}
 
-    jpeg_file
-        .as_file()
-        .set_len(0)
-        .and_then(|()| jpeg_file.as_file().seek(SeekFrom::Start(0)))
-        .context("reset jpeg scratch")?;
-    jpeg_file
-        .write_all(&jpeg_bytes)
-        .context("write jpeg scratch")?;
-    jpeg_file.as_file().flush().context("flush jpeg scratch")?;
-
-    let pdf_image = Image::from_jpeg_file(jpeg_file.path()).context("parse jpeg for pdf")?;
+/// Read a JPEG from disk and append it as a PDF page.
+fn add_pdf_page(doc: &mut Document, jpg_path: &Path, width: f64, height: f64) -> Result<()> {
+    let pdf_image = Image::from_jpeg_file(jpg_path)
+        .with_context(|| format!("parse jpeg for pdf: {}", jpg_path.display()))?;
 
     let mut page = Page::new(width, height);
     page.add_image("img", pdf_image);
