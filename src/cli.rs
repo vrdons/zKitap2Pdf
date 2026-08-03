@@ -1,30 +1,42 @@
+//! CLI argument parsing and validation (was `utils/cli.rs`).
+//!
+//! `Args` is the clap-derived raw input. `ValidatedArgs` is the canonicalised
+//! form consumed by the pipeline. We intentionally do **not** re-bundle into a
+//! per-file `HandleArgs` anymore — the pipeline takes `(exporter, &Files,
+//! scale)` directly, since `debug` becomes global once tracing is initialised.
+
 use std::{ffi::OsStr, path::PathBuf};
 
+use anyhow::{Result, anyhow, bail};
 use clap::Parser;
 use ruffle_render_wgpu::clap::GraphicsBackend;
 
+/// CLI options accepted by the binary.
 #[derive(Parser, Debug)]
+#[command(name = "zKitap2Pdf", version, about)]
 pub struct Args {
-    /// Input file
+    /// Input file or directory.
     #[arg(value_name = "INPUT")]
     pub input: PathBuf,
 
-    /// Output file
+    /// Output file (single EXE) or directory (batch).
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Scale factor for the image (bigger = better quality)
-    #[clap(short = 's', long, default_value_t = 28, value_parser = clap::value_parser!(u64).range(10..=30))]
-    pub scale: u64,
+    /// Scale factor applied to the rendered image (1.0–3.0, e.g. 2.8 = 280%).
+    #[arg(short = 's', long, default_value_t = 2.8)]
+    pub scale: f64,
 
-    #[clap(long, short, default_value = "default")]
+    /// Graphics backend used by Ruffle.
+    #[arg(long, short, default_value = "default")]
     pub graphics: GraphicsBackend,
 
-    /// Enable verbose Temp folder watching output
-    #[clap(long)]
+    /// Enable verbose output (debug-level logs).
+    #[arg(long)]
     pub debug: bool,
 }
 
+/// Normalized input/output information for a single EXE.
 #[derive(Clone, Debug)]
 pub struct Files {
     pub input: PathBuf,
@@ -32,18 +44,25 @@ pub struct Files {
     pub filename: String,
 }
 
+/// Parsed and validated arguments.
 #[derive(Debug, Clone)]
 pub struct ValidatedArgs {
     pub files: Vec<Files>,
     pub scale: f64,
     pub graphics: GraphicsBackend,
-    pub debug: bool,
 }
 
 impl Args {
-    pub fn validate(&self) -> anyhow::Result<ValidatedArgs> {
+    /// Canonicalise raw CLI input into a [`ValidatedArgs`].
+    ///
+    /// `debug` is intentionally **not** carried here — it is consumed once at
+    /// startup to initialise tracing, and from then on log level is global.
+    pub fn validate(&self) -> Result<ValidatedArgs> {
         if !self.input.exists() {
-            anyhow::bail!("Input does not exist: {:?}", self.input);
+            bail!("Input does not exist: {:?}", self.input);
+        }
+        if !(1.0..=3.0).contains(&self.scale) {
+            bail!("scale must be between 1.0 and 3.0, got {}", self.scale);
         }
 
         let files = if self.input.is_dir() {
@@ -54,23 +73,23 @@ impl Args {
 
         Ok(ValidatedArgs {
             files,
-            scale: self.scale as f64 / 10.0,
+            scale: self.scale,
             graphics: self.graphics,
-            debug: self.debug,
         })
     }
 
-    fn collect_dir(&self) -> anyhow::Result<Vec<Files>> {
-        let found = crate::utils::find_files(&self.input, "exe")?;
+    fn collect_dir(&self) -> Result<Vec<Files>> {
+        let found = crate::utils::discovery::find_files(&self.input, "exe")?;
         let output = self.output.clone().unwrap_or_else(|| PathBuf::from("out"));
         if output.is_file() {
-            anyhow::bail!("Output path must be a directory, not a file: {:?}", output);
+            bail!("Output path must be a directory, not a file: {:?}", output);
         }
         if !output.exists() {
-            std::fs::create_dir_all(&output)?;
+            std::fs::create_dir_all(&output)
+                .map_err(|e| anyhow!("creating output dir {}: {e}", output.display()))?;
         }
         if found.is_empty() {
-            anyhow::bail!("No .exe files found in input directory");
+            bail!("No .exe files found in input directory");
         }
 
         let mut list = Vec::with_capacity(found.len());
@@ -87,9 +106,9 @@ impl Args {
         Ok(list)
     }
 
-    fn collect_single(&self) -> anyhow::Result<Files> {
+    fn collect_single(&self) -> Result<Files> {
         if self.input.extension().and_then(|e| e.to_str()) != Some("exe") {
-            anyhow::bail!(
+            bail!(
                 "Input must be a directory or an .exe file: {:?}",
                 self.input
             );
@@ -101,7 +120,7 @@ impl Args {
             .clone()
             .unwrap_or_else(|| PathBuf::from(format!("{filename}.pdf")));
         if output.extension().and_then(OsStr::to_str) != Some("pdf") {
-            anyhow::bail!("Output file must be a PDF: {:?}", output);
+            bail!("Output file must be a PDF: {:?}", output);
         }
         Ok(Files {
             input,
@@ -111,8 +130,8 @@ impl Args {
     }
 }
 
-fn file_stem_string(path: &PathBuf) -> anyhow::Result<String> {
+fn file_stem_string(path: &PathBuf) -> Result<String> {
     path.file_stem()
-        .ok_or_else(|| anyhow::anyhow!("Input file has no valid name: {:?}", path))
+        .ok_or_else(|| anyhow!("Input file has no valid name: {:?}", path))
         .map(|s| s.to_string_lossy().into_owned())
 }

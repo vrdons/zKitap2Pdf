@@ -39,7 +39,7 @@ impl Exporter {
             None,
             wgpu::PowerPreference::HighPerformance,
         ))
-        .map_err(|e| anyhow!(e.to_string()))?;
+        .map_err(|e| anyhow!("requesting wgpu adapter/device: {e}"))?;
 
         Ok(Self {
             descriptors: Arc::new(Descriptors::new(instance, adapter, device, queue)),
@@ -51,26 +51,27 @@ impl Exporter {
     where
         F: FnMut(u16, RgbaImage),
     {
-        let movie = movie_from_path(path, None).map_err(|e| anyhow!(e.to_string()))?;
+        let movie = movie_from_path(path, None)
+            .map_err(|e| anyhow!("loading movie {}: {e}", path.display()))?;
         let total_frames = movie.num_frames();
 
         let width = ((movie.width().to_pixels() * self.scale).round() as u32).max(1);
         let height = ((movie.height().to_pixels() * self.scale).round() as u32).max(1);
-        println!("Width: {width} Height: {height}");
+        tracing::debug!(width, height, "render dimensions");
 
         let target = TextureTarget::new(&self.descriptors.device, (width, height))
-            .map_err(|e| anyhow!(e.to_string()))?;
+            .map_err(|e| anyhow!("creating render texture target: {e}"))?;
 
         let player = PlayerBuilder::new()
             .with_renderer(
                 WgpuRenderBackend::new(self.descriptors.clone(), target)
-                    .map_err(|e| anyhow!(e.to_string()))?,
+                    .map_err(|e| anyhow!("building wgpu render backend: {e}"))?,
             )
             .with_movie(movie)
             .with_viewport_dimensions(width, height, self.scale)
             .build();
 
-        println!("Total Frames: {total_frames}");
+        tracing::debug!(total_frames, "capturing frames");
 
         for i in 0..total_frames {
             let capture_attempt = {
@@ -91,11 +92,13 @@ impl Exporter {
 
             match capture_attempt {
                 Ok(Ok(Some(img))) => {
-                    println!("Frame {i} captured.");
+                    tracing::info!(frame = i, "captured");
                     on_frame(i, img);
                 }
-                Ok(Ok(None)) => eprintln!("WARN: Frame {i} captured an empty image."),
-                Ok(Err(e)) => return Err(anyhow!("Render/downcast error on frame {i}: {e:?}")),
+                Ok(Ok(None)) => tracing::warn!(frame = i, "captured an empty image"),
+                Ok(Err(e)) => {
+                    return Err(anyhow!("Render/downcast error on frame {i}: {e:?}"));
+                }
                 Err(e) => return Err(anyhow!("Panicked on frame {i}: {e:?}")),
             }
         }

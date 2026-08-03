@@ -1,48 +1,53 @@
+//! zKitap2Pdf entry point.
+//!
+//! Parses the CLI, initialises tracing, sets up the Wine environment, and
+//! dispatches each input EXE to the conversion pipeline. Per-file errors are
+//! collected (rather than aborting) so a batch run reports every failure.
+
+mod cli;
+mod config;
+mod fernus;
+mod pipeline;
+mod ruffle;
+mod utils;
+
 use std::time::Duration;
 
-use crate::cli::Args;
-use crate::executable::setup_environment;
-use crate::export::HandleArgs;
-
+use anyhow::Result;
 use clap::Parser;
 
-pub mod cli;
-pub mod decrypt;
-pub mod executable;
-pub mod export;
-pub mod exporter;
-pub mod fernus_assets;
-pub mod pe_scanner;
-pub mod utils;
+use crate::cli::Args;
+use crate::ruffle::exporter::{Exporter, ExporterOpt};
+use crate::utils::logging;
+use crate::utils::process::setup_environment;
 
-fn main() -> anyhow::Result<()> {
-    let args = Args::parse().validate()?;
-    let exporter = exporter::Exporter::new(&exporter::ExporterOpt {
+fn main() -> Result<()> {
+    let raw_args = Args::parse();
+    logging::init(raw_args.debug);
+    let args = raw_args.validate()?;
+
+    let exporter = Exporter::new(&ExporterOpt {
         graphics: args.graphics,
         scale: args.scale,
     })?;
-    println!("-- Setting up environment, this may take a while...");
-    setup_environment()?;
-    let mut errors = Vec::new();
 
+    setup_environment()?;
+
+    let mut errors = Vec::new();
     for file in &args.files {
-        println!("Processing: {:?}", file.input);
-        if let Err(e) = export::handle_exe(
-            &exporter,
-            &HandleArgs {
-                file: file.clone(),
-                scale: args.scale,
-                debug: args.debug,
-            },
-        ) {
-            println!("An error occurred: {:?}", e);
+        tracing::info!(input = %file.input.display(), "processing");
+        if let Err(e) = pipeline::handle_exe(&exporter, file, args.scale) {
+            tracing::error!(error = %e, input = %file.input.display(), "conversion failed");
             errors.push((file.input.clone(), e));
         }
-        std::thread::sleep(Duration::from_millis(1000));
+        std::thread::sleep(Duration::from_millis(250));
     }
+
     if !errors.is_empty() {
-        eprintln!("Failed to process {} file(s)", errors.len());
-        eprintln!("{:?}", errors);
+        tracing::error!(count = errors.len(), "failed to process file(s)");
+        for (path, e) in &errors {
+            tracing::error!(input = %path.display(), error = ?e);
+        }
     }
     Ok(())
 }

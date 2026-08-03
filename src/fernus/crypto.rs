@@ -1,18 +1,24 @@
-//! Fernus Z-Kitap crypto: KK (Blowfish-ECB + reverse-Base64-XOR) and KrySWFCrypto.
+//! Fernus encryption helpers for the KK and KrySWFCrypto formats.
 
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use blowfish::Blowfish;
 use blowfish::cipher::{Block, BlockCipherDecrypt, KeyInit};
 
-/// Default publisher key — used only as fallback if extraction from SWF fails.
+/// Default publisher key used as a fallback when the runtime bundle does not expose one.
+/// Default publisher (`publisher.kxk`) decryption key.
 pub const DEFAULT_PUBLISHER_KEY: &str = "pub1isher1l0O";
+
+/// Default `pkxk` (fernus `kxk`) filename stem. Reserved for the direct-path
+/// consumer (see `fernus::assets`); the active pipeline resolves codes via the
+/// publisher payload instead.
+#[allow(dead_code)]
 pub const DEFAULT_FERNUS_KEY: &str = "kxk";
 
 pub struct KK;
 
 impl KK {
-    /// fd2 (reverse+b64+XOR) if requested, then lenient base64 decode + Blowfish-ECB.
+    /// Apply the fd2 pre-processing step when requested, then decrypt via Blowfish-ECB.
     pub fn fd1(data: &str, key_str: &str, apply_fd2: bool) -> Result<String> {
         let decoded: std::borrow::Cow<'_, str> = if apply_fd2 {
             Self::fd2(data, key_str)?.into()
@@ -20,7 +26,6 @@ impl KK {
             data.into()
         };
 
-        // AS3 Base64Decoder silently skips non-alphabet chars.
         let mut filtered: Vec<u8> = Vec::with_capacity(decoded.len());
         for &b in decoded.as_bytes() {
             if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=') {
@@ -32,7 +37,6 @@ impl KK {
             .decode(&filtered)
             .map_err(|e| anyhow!("fd1 base64: {e}"))?;
 
-        // Blowfish key = hex(ascii(key_str)) interpreted as raw bytes.
         let key_str_bytes = key_str.as_bytes();
         let mut key_bytes = Vec::with_capacity(key_str_bytes.len());
         for &b in key_str_bytes {
@@ -44,7 +48,7 @@ impl KK {
         String::from_utf8(decrypted).map_err(|e| anyhow!("fd1 utf8: {e}"))
     }
 
-    /// Reverse (by byte) + base64 decode + repeating-key XOR.
+    /// Reverse the bytes, base64-decode, and XOR against a repeating key.
     pub fn fd2(input: &str, key: &str) -> Result<String> {
         let bytes = input.as_bytes();
         let mut reversed: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -90,7 +94,10 @@ impl KK {
             bf.decrypt_block(block);
         }
 
-        let pad_len = *result.last().unwrap() as usize;
+        let pad_len = *result
+            .last()
+            .ok_or_else(|| anyhow!("empty plaintext after decrypt"))?
+            as usize;
         if pad_len == 0 || pad_len > 8 {
             return Err(anyhow!("invalid PKCS5 padding length: {pad_len}"));
         }
@@ -110,7 +117,7 @@ pub struct KryCode {
     pub f3: i32,
 }
 
-/// Verified KryCode for the default Fernus publisher distribution.
+/// Verified Fernus decryption parameters for the default distribution.
 pub const DEFAULT_KRY_CODE: KryCode = KryCode {
     f1: 33,
     f2: 20,
@@ -120,7 +127,7 @@ pub const DEFAULT_KRY_CODE: KryCode = KryCode {
 pub struct KrySWFCrypto;
 
 impl KrySWFCrypto {
-    /// Decrypt SWF bytes in place. All arithmetic wraps modulo 256.
+    /// Decrypt SWF bytes in place. Arithmetic wraps modulo 256.
     pub fn decrypt(bytes: &mut [u8], code: &KryCode) -> Result<()> {
         Self::separate_bytes(bytes, 10000, 11000, code.f1, code.f2);
         Self::separate_bytes(bytes, 5000, 5500, code.f3, code.f1);
@@ -153,8 +160,6 @@ impl KrySWFCrypto {
             return;
         }
 
-        // In place: subtract n2, reverse, subtract n2 again — equivalent to the
-        // original two-pass form but avoids a temporary Vec allocation.
         let slice = &mut bytes[start..end];
         let n2 = n2 as u8;
         for b in slice.iter_mut() {
@@ -167,7 +172,7 @@ impl KrySWFCrypto {
     }
 }
 
-/// Parse fernusCode "XxYxZ" or "X_Y_Z" into a KryCode, adding pkxkname length to each part.
+/// Parse a Fernus code like "33x20x10" or "33_20_10" into a KryCode.
 pub fn parse_kry_code(fernus_code_decrypted: &str, pkxkname_len: usize) -> Result<KryCode> {
     let sep = if fernus_code_decrypted.contains('x') {
         'x'

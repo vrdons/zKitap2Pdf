@@ -15,8 +15,6 @@ exclude = [
     ".git/",
     ".github/",
     "tools/",
-    "*.log",
-    "debug/",
     "*.pdf",
     "in/"
 ]
@@ -27,6 +25,8 @@ clap = { version = "4.5.58", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 notify = "8.2.0"
 walkdir = "2.5.0"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
 swf = { git = "https://github.com/ruffle-rs/ruffle.git", package = "swf", rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_core", features = ["deterministic", "default_font"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
 ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render_wgpu", features = ["clap"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
