@@ -51,8 +51,8 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
 
     for (name, data) in &payloads {
         // Skip config files — they're only for KryCode resolution
-        // Sysm.frns is mask
-        if name == "p.dll" || name == "sysd.dll" || name == "sysd.frns" || name == "sysm.frns" || name == "publisher.kxk" {
+        // Sysm is mask
+        if name == "p.dll" || name.starts_with("sysd") || name.starts_with("sysm") || name == "publisher.kxk" {
             continue;
         }
 
