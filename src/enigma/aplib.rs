@@ -146,7 +146,7 @@ impl<'a> AplibDecoder<'a> {
                     if lwm == 0 && offs == 2 {
                         // Reuse previous offset
                         offs = r0 as usize;
-                        let mut length = self.getgamma()?;
+                        let length = self.getgamma()?;
                         for _ in 0..length {
                             let idx = self.dst.len().wrapping_sub(offs);
                             if idx < self.dst.len() {
@@ -215,23 +215,4 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-#[derive(Debug)]
-pub enum AplibError {
-    UnexpectedEof,
-    InvalidOffset,
-    InvalidHeader,
-    PackedCrcMismatch,
-}
-
-impl std::fmt::Display for AplibError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AplibError::UnexpectedEof => write!(f, "unexpected end of aPLib stream"),
-            AplibError::InvalidOffset => write!(f, "invalid offset in aPLib stream"),
-            AplibError::InvalidHeader => write!(f, "invalid AP32 header"),
-            AplibError::PackedCrcMismatch => write!(f, "packed data CRC mismatch"),
-        }
-    }
-}
-
-impl std::error::Error for AplibError {}
+pub use crate::error::AplibError;

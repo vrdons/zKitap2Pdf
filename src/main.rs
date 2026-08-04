@@ -7,12 +7,13 @@
 mod cli;
 mod config;
 mod enigma;
+pub mod error;
 mod fernus;
+mod image_proc;
+mod pdf;
 mod pipeline;
 mod ruffle;
 mod utils;
-
-use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -34,14 +35,14 @@ fn main() -> Result<()> {
 
     setup_environment()?;
 
+    let upscale = crate::image_proc::UpscaleOpts::new(args.scale);
     let mut errors = Vec::new();
     for file in &args.files {
         tracing::info!(input = %file.input.display(), "processing");
-        if let Err(e) = pipeline::handle_exe(&exporter, file, args.scale) {
+        if let Err(e) = pipeline::handle_exe(&exporter, file, &upscale) {
             tracing::error!(error = %e, input = %file.input.display(), "conversion failed");
             errors.push((file.input.clone(), e));
         }
-        std::thread::sleep(Duration::from_millis(250));
     }
 
     if !errors.is_empty() {

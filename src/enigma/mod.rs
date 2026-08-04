@@ -1,14 +1,19 @@
 //! Enigma Virtual Box PE section parser and VFS extractor.
+mod aplib;
 mod pe;
 mod records;
-mod aplib;
 
 use std::fs;
 
 pub use pe::PeInfo;
 
 /// Kind of a VFS entry.
+///
+/// `Folder` is produced by the record walker as a structural marker when
+/// recursing through the tree, but never emitted as an [`ExtractedFile`];
+/// keeping the variant documents the on-disk format faithfully.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum VfsEntryKind {
     File,
     Folder,
@@ -154,8 +159,8 @@ fn decompress_chunks(
         let chunk = &compressed_data[compressed_pos..compressed_pos + chunk_size];
         compressed_pos += chunk_size;
 
-        let dec = aplib::decompress(chunk, false)
-            .map_err(|e| Error::VfsParse(format!("aplib: {e}")))?;
+        let dec =
+            aplib::decompress(chunk, false).map_err(|e| Error::VfsParse(format!("aplib: {e}")))?;
         output.extend_from_slice(&dec);
     }
 
@@ -170,40 +175,5 @@ fn decompress_chunks(
     Ok(output)
 }
 
-#[derive(Debug)]
-pub enum Error {
-    Io(std::io::Error),
-    InvalidPe,
-    NoEnigmaSection(String),
-    InvalidMagic,
-    UnexpectedEof,
-    VfsParse(String),
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "I/O error: {e}"),
-            Self::InvalidPe => write!(f, "Not a valid PE file"),
-            Self::NoEnigmaSection(s) => write!(f, "PE section {s} not found"),
-            Self::InvalidMagic => write!(f, "Invalid EVB magic: expected 'EVB\\0'"),
-            Self::UnexpectedEof => write!(f, "Unexpected end of data"),
-            Self::VfsParse(s) => write!(f, "VFS parse error: {s}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
+pub use crate::error::EnigmaError as Error;
+use crate::error::Result;

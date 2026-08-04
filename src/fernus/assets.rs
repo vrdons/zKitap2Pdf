@@ -104,7 +104,7 @@ pub fn decrypt_pages(assets: &AssetBundle, code: &KryCode) -> Result<Vec<u8>> {
 
     let mut bytes =
         std::fs::read(path).map_err(|e| anyhow!("reading {}: {}", path.display(), e))?;
-    KrySWFCrypto::decrypt(&mut bytes, code)?;
+    KrySWFCrypto::decrypt(&mut bytes, code);
 
-    swf::to_fws(&bytes)
+    Ok(swf::to_fws(&bytes)?)
 }

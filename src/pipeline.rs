@@ -21,6 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use image::DynamicImage;
 use tempfile::TempDir;
 
 use crate::cli::Files;
@@ -28,16 +29,18 @@ use crate::fernus::assets::PublisherConfig;
 use crate::fernus::crypto::{DEFAULT_KRY_CODE, DEFAULT_PUBLISHER_KEY, KK, KryCode, KrySWFCrypto};
 use crate::fernus::frns::{self, DecryptedFrame};
 use crate::fernus::v3;
+use crate::image_proc::UpscaleOpts;
+use crate::pdf::{PageInput, PdfOutput, page_with_overlay, write_pages};
 use crate::ruffle::exporter::Exporter;
 use crate::ruffle::render::{SwfInput, render as render_pdf};
 use crate::ruffle::swf;
 use crate::utils::{self, process, watcher};
 
 /// Process one EXE end-to-end. Auto-detects v1/v2 vs v3 format.
-pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
+pub fn handle_exe(exporter: &Exporter, file: &Files, upscale: &UpscaleOpts) -> Result<()> {
     if utils::has_enigma(&file.input) {
         tracing::info!("v3 format detected (Enigma + Flutter)");
-        return handle_v3(file, scale);
+        return handle_v3(file, upscale);
     }
 
     let _child = process::execute_exe(&file.input)?;
@@ -62,7 +65,11 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
     for (name, data) in &payloads {
         // Skip config files — they're only for KryCode resolution
         // Sysm is mask
-        if name == "p.dll" || name.starts_with("sysd") || name.starts_with("sysm") || name == "publisher.kxk" {
+        if name == "p.dll"
+            || name.starts_with("sysd")
+            || name.starts_with("sysm")
+            || name == "publisher.kxk"
+        {
             continue;
         }
 
@@ -107,11 +114,11 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
     }
 
     swf_inputs.sort_by_key(|input| !input.name.contains("sysb"));
-    render_pdf(exporter, &swf_inputs, file, scale)
+    render_pdf(exporter, &swf_inputs, file, upscale)
 }
 
 /// Process a v3 Flutter + Enigma EXE.
-fn handle_v3(file: &Files, _scale: f64) -> Result<()> {
+fn handle_v3(file: &Files, upscale: &UpscaleOpts) -> Result<()> {
     // Step 1: Unpack Enigma VFS
     tracing::info!("[1/6] Unpacking Enigma VFS...");
     let extracted = crate::enigma::unpack(&file.input).context("Enigma unpack failed")?;
@@ -169,13 +176,11 @@ fn handle_v3(file: &Files, _scale: f64) -> Result<()> {
         .as_str()
         .ok_or_else(|| anyhow!("fernusCode not found in publisher.json"))?;
     let fernus_code = String::from_utf8(
-        v3::decrypt_string(fernus_code_enc, keystr_bytes, iv)
-            .context("decrypt fernusCode")?,
+        v3::decrypt_string(fernus_code_enc, keystr_bytes, iv).context("decrypt fernusCode")?,
     )
     .context("fernusCode not UTF-8")?;
 
     tracing::info!(fernus_code = %fernus_code, "fernusCode decrypted");
-
 
     // Step 4: Create book key
     tracing::info!("[4/6] Creating book key...");
@@ -190,32 +195,39 @@ fn handle_v3(file: &Files, _scale: f64) -> Result<()> {
         .ok_or_else(|| anyhow!("book.json not found in VFS"))?;
     let book_enc_str = std::str::from_utf8(book_enc).context("book.json not UTF-8")?;
 
-    let book_json_bytes = v3::decrypt_string(book_enc_str.trim(), &book_key, iv)
-        .context("decrypt book.json")?;
+    let book_json_bytes =
+        v3::decrypt_string(book_enc_str.trim(), &book_key, iv).context("decrypt book.json")?;
     let book_json_str = String::from_utf8(book_json_bytes).context("book.json not UTF-8")?;
     let book_data: serde_json::Value =
         serde_json::from_str(&book_json_str).context("book.json parse")?;
 
-    let book_name = book_data["bookName"]
-        .as_str()
-        .unwrap_or("unknown");
+    let book_name = book_data["bookName"].as_str().unwrap_or("unknown");
     let total_page = book_data["totalPage"].as_u64().unwrap_or(0);
     tracing::info!(book_name, total_page, "book metadata");
 
     // Collect and decrypt webp files from the VFS
-    let (pages, layers, _thumbs) = collect_v3_webp(&extracted, &book_key, iv)?;
-    tracing::info!(pages = pages.len(), layers = layers.len(), "assets decrypted");
+    let assets = collect_v3_webp(&extracted, &book_key, iv)?;
+    tracing::info!(
+        pages = assets.pages.len(),
+        layers = assets.layers.len(),
+        "assets decrypted"
+    );
 
-    // Step 6: webp → PDF
+    // Step 6: webp → PDF (with optional upscale + layer overlay)
     tracing::info!("[6/6] Converting webp → PDF...");
-    let pdf_path = file.output.clone();
-    if let Some(parent) = pdf_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    webp_to_pdf(&pages, &layers, &pdf_path)?;
-    tracing::info!(output = %pdf_path.display(), "PDF written");
-
+    write_v3_pdf(file, &assets, upscale)?;
     Ok(())
+}
+
+/// Decrypted v3 page assets, keyed by the real (1-based) page number.
+///
+/// Layers and pages share the same numbering scheme (`p-N.webp` ↔ `p-l-N.webp`),
+/// so an overlay is looked up by page number — **not** by a zero-based vector
+/// index. The previous implementation indexed layers by vector position, which
+/// never matched and silently dropped all overlays.
+struct V3Assets {
+    pages: Vec<(usize, Vec<u8>)>,
+    layers: HashMap<usize, Vec<u8>>,
 }
 
 /// Collect, decrypt, and categorise webp files from extracted VFS.
@@ -223,37 +235,33 @@ fn collect_v3_webp(
     extracted: &[crate::enigma::ExtractedFile],
     book_key: &[u8],
     iv: &[u8],
-) -> Result<(Vec<Vec<u8>>, HashMap<usize, Vec<u8>>, Vec<Vec<u8>>)> {
+) -> Result<V3Assets> {
     let mut pages: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut layers: HashMap<usize, Vec<u8>> = HashMap::new();
-    let mut thumbs: Vec<Vec<u8>> = Vec::new();
 
     for f in extracted {
         let path = &f.path;
         let fn_lower = path.to_lowercase();
-
         if !fn_lower.ends_with(".webp") {
             continue;
         }
 
-        // Extract filename from path
+        // Extract filename from path.
         let name = Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
         let name_lower = name.to_lowercase();
 
-        // Thumbnails: t-*.webp — unencrypted (RIFF header)
-        if name_lower.starts_with("t-") && f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
-            thumbs.push(f.data.clone());
+        // Thumbnails (t-*.webp) are unencrypted and unused by the PDF, skip them.
+        if name_lower.starts_with("t-") {
             continue;
         }
 
-        // Try AES decrypt
+        // Try AES decrypt; fall back to plaintext if it already has a RIFF header.
         let dec = match v3::decrypt_bytes(&f.data, book_key, iv) {
             Ok(d) => d,
             Err(_) => {
-                // Maybe it's already plain (RIFF header)
                 if f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
                     f.data.clone()
                 } else {
@@ -263,109 +271,106 @@ fn collect_v3_webp(
             }
         };
 
-        // p-l-N.webp = layer for page N
-        if name_lower.starts_with("p-l-") {
-            if let Some(num) = extract_page_number(name) {
+        // Validate that the decrypted payload actually looks like webp — a bad
+        // key/IV yields garbage that would panic the image decoder later.
+        if dec.len() < 12 || &dec[..4] != b"RIFF" || &dec[8..12] != b"WEBP" {
+            tracing::warn!(path = %path, "decrypted data is not a valid WebP, skipping");
+            continue;
+        }
+
+        // p-l-N.webp = overlay layer for page N
+        if let Some(stripped) = name_lower.strip_prefix("p-l-") {
+            if let Some(num) = parse_page_num_suffix(stripped) {
                 layers.insert(num, dec);
             }
             continue;
         }
 
-        // p-N.webp = page N
-        if name_lower.starts_with("p-") {
-            if let Some(num) = extract_page_number(name) {
+        // p-N.webp = page N (content)
+        if let Some(stripped) = name_lower.strip_prefix("p-") {
+            if let Some(num) = parse_page_num_suffix(stripped) {
                 pages.push((num, dec));
             }
             continue;
         }
 
-        // Unknown webp, skip
         tracing::debug!(path = %path, "unknown webp, skipped");
     }
 
-    // Sort pages by number
+    // Sort pages by their real page number to guarantee natural reading order.
     pages.sort_by_key(|(n, _)| *n);
 
-    let pages: Vec<Vec<u8>> = pages.into_iter().map(|(_, d)| d).collect();
-    Ok((pages, layers, thumbs))
+    Ok(V3Assets { pages, layers })
 }
 
-fn extract_page_number(name: &str) -> Option<usize> {
-    // p-1.webp or p-l-1.webp → extract "1"
-    let stem = name.trim_end_matches(".webp").trim_end_matches(".WEBP");
-    // Find the last '-' and parse what follows
-    let pos = stem.rfind('-')?;
-    stem[pos + 1..].parse::<usize>().ok()
-}
-
-/// Convert decrypted webp pages + optional layers to a PDF.
-fn webp_to_pdf(
-    pages: &[Vec<u8>],
-    layers: &HashMap<usize, Vec<u8>>,
-    pdf_path: &Path,
-) -> Result<()> {
-    use image::{DynamicImage, ImageFormat};
-
-    if pages.is_empty() {
-        // Create empty PDF
-        let mut doc = oxidize_pdf::Document::new();
-        return doc.save(pdf_path).context("save empty PDF");
+/// Parse the trailing page number from a filename stem like `1` (from `p-1`)
+/// or `p-l-1`. Handles leading zeros (`p-001`) and ignores case.
+fn parse_page_num_suffix(stem_lower: &str) -> Option<usize> {
+    // Take trailing run of ASCII digits.
+    let digits: &str = stem_lower.trim_end_matches(".webp");
+    let digits = match digits.rfind(|c: char| !c.is_ascii_digit()) {
+        Some(i) => &digits[i + 1..],
+        None => digits,
+    };
+    if digits.is_empty() {
+        return None;
     }
+    digits.parse::<usize>().ok()
+}
 
-    let mut doc = oxidize_pdf::Document::new();
-    doc.set_title(&file_stem(pdf_path));
+/// Decode a webp byte buffer into a `DynamicImage`.
+///
+/// Centralised here so both the page and the layer paths use one decoder, and
+/// so a corrupt page surfaces a clear, contextualised error instead of a raw
+/// `image::ImageError`.
+fn decode_webp(bytes: &[u8], what: &str) -> Result<DynamicImage> {
+    image::load_from_memory_with_format(bytes, image::ImageFormat::WebP)
+        .with_context(|| format!("decode webp {what}"))
+}
 
-    for (idx, page_data) in pages.iter().enumerate() {
-        let mut img = image::load_from_memory_with_format(page_data, ImageFormat::WebP)
-            .with_context(|| format!("decode webp page {idx}"))?
-            .to_rgb8();
-
-        // Merge layer if exists
-        if let Some(layer_data) = layers.get(&idx) {
-            let layer = image::load_from_memory_with_format(layer_data, ImageFormat::WebP)
-                .with_context(|| format!("decode webp layer {idx}"))?
-                .to_rgba8();
-
-            // Paste RGBA layer onto RGB page
-            for y in 0..layer.height().min(img.height()) {
-                for x in 0..layer.width().min(img.width()) {
-                    let lp = layer.get_pixel(x, y);
-                    if lp[3] > 0 {
-                        img.put_pixel(x, y, image::Rgb([lp[0], lp[1], lp[2]]));
+/// Build the PDF from v3 webp pages, applying optional upscale and overlay.
+///
+/// Pages are streamed one at a time through [`crate::pdf::write_pages`], so a
+/// 500-page book never holds 500 decoded images in RAM at once.
+fn write_v3_pdf(file: &Files, assets: &V3Assets, upscale: &UpscaleOpts) -> Result<()> {
+    let layers = &assets.layers;
+    let pages = assets.pages.iter().map(|(num, data)| {
+        let res: Result<PageInput> = (|| {
+            let base = decode_webp(data, &format!("page {num}"))?;
+            let overlay = match layers.get(num) {
+                Some(l) => match decode_webp(l, &format!("layer {num}")) {
+                    Ok(img) => {
+                        tracing::info!(page = num, "converted");
+                        Some(img)
                     }
-                }
+                    Err(e) => {
+                        // A broken layer must not kill the page; warn and skip.
+                        tracing::warn!(page = num, error = %e, "overlay decode failed");
+                        None
+                    }
+                },
+                None => None,
+            };
+            Ok(PageInput::new(page_with_overlay(base, overlay.as_ref())))
+        })();
+        res
+    });
+
+    let out = PdfOutput {
+        path: file.output.clone(),
+        title: file.filename.clone(),
+    };
+    write_pages(
+        pages.filter_map(|r| match r {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(error = %e, "page dropped");
+                None
             }
-        }
-
-        // Encode as JPEG for PDF
-        let mut jpg_buf = Vec::new();
-        DynamicImage::ImageRgb8(img)
-            .write_to(&mut std::io::Cursor::new(&mut jpg_buf), ImageFormat::Jpeg)
-            .with_context(|| format!("encode jpg page {idx}"))?;
-
-        let pdf_image = oxidize_pdf::Image::from_jpeg_data(jpg_buf)
-            .with_context(|| format!("pdf image page {idx}"))?;
-
-        let mut page = oxidize_pdf::Page::new(
-            pdf_image.width() as f64,
-            pdf_image.height() as f64,
-        );
-        page.add_image("img", pdf_image);
-        page.draw_image("img", 0.0, 0.0,
-            page.width(), page.height(),
-        )?;
-        doc.add_page(page);
-    }
-
-    doc.save(pdf_path).context("save PDF")?;
-    Ok(())
-}
-
-fn file_stem(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output")
-        .to_string()
+        }),
+        &out,
+        upscale,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +382,9 @@ fn resolve_kry_code(payloads: &HashMap<String, Vec<u8>>) -> KryCode {
 
     // Ordered probes: sysd.frns → sysd.dll → publisher.kxk → default
     for config_name in &["sysd.frns", "sysd.dll", "publisher.kxk"] {
-        let Some(data) = payloads.get(*config_name) else { continue };
+        let Some(data) = payloads.get(*config_name) else {
+            continue;
+        };
 
         let text = String::from_utf8_lossy(data);
         let Ok(decrypted) = KK::fd1(text.trim(), key, true) else {
@@ -411,12 +418,15 @@ fn extract_kry_code_from_xml(xml: &str) -> Option<KryCode> {
     crate::fernus::crypto::parse_kry_code(fernus_code, pkxkname.len()).ok()
 }
 
-
 // ---------------------------------------------------------------------------
 // SWF writing helpers
 // ---------------------------------------------------------------------------
 
-fn write_frame_swf(swf_tmp: &TempDir, bundle_name: &str, frame: &DecryptedFrame) -> Option<SwfInput> {
+fn write_frame_swf(
+    swf_tmp: &TempDir,
+    bundle_name: &str,
+    frame: &DecryptedFrame,
+) -> Option<SwfInput> {
     let fws = match swf::to_fws(&frame.swf_bytes) {
         Ok(f) => f,
         Err(e) => {
@@ -442,7 +452,12 @@ fn write_frame_swf(swf_tmp: &TempDir, bundle_name: &str, frame: &DecryptedFrame)
     }
 }
 
-fn write_patched_swf(fws_bytes: &[u8], dest: &PathBuf, width: f64, height: f64) -> Result<SwfInput> {
+fn write_patched_swf(
+    fws_bytes: &[u8],
+    dest: &PathBuf,
+    width: f64,
+    height: f64,
+) -> Result<SwfInput> {
     // If dims provided by caller (e.g. FRNS metadata), use fast path.
     // Otherwise scan DefineShape bounds.
     let (w, h) = if width > 0.0 && height > 0.0 {
@@ -453,20 +468,33 @@ fn write_patched_swf(fws_bytes: &[u8], dest: &PathBuf, width: f64, height: f64) 
     };
     let swf_buf = swf::decompress_swf_quick(fws_bytes)?;
     let patched = swf::patch(swf_buf, w, h)?;
-    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("unknown.swf").to_string();
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown.swf")
+        .to_string();
     fs::write(dest, &patched)?;
-    Ok(SwfInput { name, path: dest.clone(), width: w, height: h })
+    Ok(SwfInput {
+        name,
+        path: dest.clone(),
+        width: w,
+        height: h,
+    })
 }
 
 fn try_decrypt_kry(data: &[u8], code: &KryCode) -> Option<Vec<u8>> {
-    if data.is_empty() { return None; }
+    if data.is_empty() {
+        return None;
+    }
     let mut bytes = data.to_vec();
-    KrySWFCrypto::decrypt(&mut bytes, code).ok()?;
+    KrySWFCrypto::decrypt(&mut bytes, code);
     swf::to_fws(&bytes).ok()
 }
 
 fn try_decrypt_fd1(data: &[u8], key: &str) -> Option<Vec<u8>> {
-    if data.is_empty() { return None; }
+    if data.is_empty() {
+        return None;
+    }
     let text = String::from_utf8_lossy(data);
     let decrypted = KK::fd1(text.trim(), key, true).ok()?;
     swf::to_fws(decrypted.as_bytes()).ok()

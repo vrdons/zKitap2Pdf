@@ -44,17 +44,6 @@ pub fn setup_environment() -> Result<()> {
         let prefix = wineprefix();
         tracing::debug!(prefix = %prefix.display(), "resolved wine prefix");
 
-        // %TEMP% zaten mevcutsa prefix hazırdır; wineboot --init çok yavaş
-        // olduğu için her çalışmada tekrarlamaya gerek yok.
-        let temp = temp_path()?;
-        if temp.exists() {
-            tracing::debug!(
-                temp = %temp.display(),
-                "wine temp already present, skipping wineboot --init"
-            );
-            return Ok(());
-        }
-
         fs::create_dir_all(&prefix)
             .with_context(|| format!("creating wine prefix {}", prefix.display()))?;
 

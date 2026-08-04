@@ -6,25 +6,26 @@
 //! - AES-256-CBC decryption (matching Dart `package:encrypt`)
 //! - `createKey` (key derivation matching Dart implementation)
 
-use anyhow::{Context, Result, anyhow};
 use aes::Aes256;
 use base64::Engine;
+
+pub use crate::error::V3Error;
 
 /// Extract keystr from kernel_blob.bin by XORing `_enviedkey_keyStr` and
 /// `_envieddata_keyStr` Dart arrays. Each XOR result's low byte is one
 /// character of the key string.
-pub fn extract_keystr(kernel_data: &[u8]) -> Result<String> {
+pub fn extract_keystr(kernel_data: &[u8]) -> Result<String, V3Error> {
     let key_ints = parse_envied_array(kernel_data, "key")
-        .context("failed to parse _enviedkey_keyStr")?;
+        .map_err(|e| V3Error::ArrayNotFound(format!("key: {e}")))?;
     let data_ints = parse_envied_array(kernel_data, "data")
-        .context("failed to parse _envieddata_keyStr")?;
+        .map_err(|e| V3Error::ArrayNotFound(format!("data: {e}")))?;
 
     if key_ints.len() != data_ints.len() {
-        return Err(anyhow!(
-            "envied array length mismatch: key={}, data={}",
-            key_ints.len(),
-            data_ints.len()
-        ));
+        // Not reachable from parse_envied_array's API but kept for robustness.
+        return Err(V3Error::ArrayMismatch {
+            tag: ' ',
+            expected: "key/data length",
+        });
     }
 
     let chars: String = key_ints
@@ -38,7 +39,7 @@ pub fn extract_keystr(kernel_data: &[u8]) -> Result<String> {
 }
 
 /// Extract IV from kernel_blob.bin: `static final iv = IV.fromUtf8('...')`.
-pub fn extract_iv(kernel_data: &[u8]) -> Result<String> {
+pub fn extract_iv(kernel_data: &[u8]) -> Result<String, V3Error> {
     // Search for known patterns
     let patterns: &[&[u8]] = &[
         b"static final iv = IV.fromUtf8('",
@@ -49,24 +50,21 @@ pub fn extract_iv(kernel_data: &[u8]) -> Result<String> {
         if let Some(idx) = kernel_data.windows(pat.len()).position(|w| w == *pat) {
             let start = idx + pat.len();
             if let Some(end) = kernel_data[start..].iter().position(|&b| b == b'\'') {
-                return String::from_utf8(kernel_data[start..start + end].to_vec())
-                    .context("IV is not valid UTF-8");
+                let iv_bytes = &kernel_data[start..start + end];
+                return Ok(std::str::from_utf8(iv_bytes)?.to_string());
             }
         }
     }
 
     // Fallback: regex-like search for iv = IV.fromUtf8('...')
-    // Use regex crate
-    let re = regex::bytes::Regex::new(r"iv\s*=\s*IV\.fromUtf8\('([^']+)'")
-        .map_err(|e| anyhow!("regex compile: {e}"))?;
-    if let Some(caps) = re.captures(kernel_data) {
-        if let Some(m) = caps.get(1) {
-            return String::from_utf8(m.as_bytes().to_vec())
-                .context("IV is not valid UTF-8");
-        }
+    let re = regex::bytes::Regex::new(r"iv\s*=\s*IV\.fromUtf8\('([^']+)'")?;
+    if let Some(caps) = re.captures(kernel_data)
+        && let Some(m) = caps.get(1)
+    {
+        return Ok(std::str::from_utf8(m.as_bytes())?.to_string());
     }
 
-    Err(anyhow!("Could not find IV in kernel_blob.bin"))
+    Err(V3Error::IvNotFound)
 }
 
 /// Dart: `createKey(String key) => key + keystr.substring(0, 32 - key.length)`
@@ -85,25 +83,25 @@ pub fn create_key(key: &str, keystr: &str) -> Vec<u8> {
 }
 
 /// Dart: `decryptString` — reverse string, base64-decode, AES-CBC decrypt, PKCS7 unpad.
-pub fn decrypt_string(encrypted: &str, key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_string(encrypted: &str, key: &[u8], iv: &[u8]) -> Result<Vec<u8>, V3Error> {
     let reversed: String = encrypted.chars().rev().collect();
 
     // Dart Base64Decoder is lenient — try to decode with added padding
     let mut raw = reversed.clone();
     // Add padding if needed
-    while raw.len() % 4 != 0 {
+    while !raw.len().is_multiple_of(4) {
         raw.push('=');
     }
 
     let ciphertext = base64::engine::general_purpose::STANDARD
         .decode(&raw)
-        .context("decrypt_string: base64 decode failed")?;
+        .map_err(|_| V3Error::ArrayNotFound("decrypt_string: base64 decode".into()))?;
 
     aes_cbc_decrypt(&ciphertext, key, iv)
 }
 
 /// Dart: `decryptByte` — AES-CBC decrypt directly, PKCS7 unpad.
-pub fn decrypt_bytes(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_bytes(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, V3Error> {
     aes_cbc_decrypt(data, key, iv)
 }
 
@@ -117,23 +115,22 @@ pub fn decrypt_bytes(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
 /// can produce masked ints that exceed `i32::MAX` (e.g. 3_290_869_934). The
 /// low byte of each value (after XOR with its data counterpart) is what
 /// actually matters, so the wider type is harmless.
-fn parse_envied_array(kernel_data: &[u8], suffix: &str) -> Result<Vec<i64>> {
+fn parse_envied_array(kernel_data: &[u8], suffix: &str) -> Result<Vec<i64>, V3Error> {
     let needle = format!("_envied{suffix}_keyStr = <int>[");
     let needle_bytes = needle.as_bytes();
 
     let idx = kernel_data
         .windows(needle_bytes.len())
         .position(|w| w == needle_bytes)
-        .ok_or_else(|| anyhow!("Could not find _envied{suffix}_keyStr"))?;
+        .ok_or_else(|| V3Error::ArrayNotFound(format!("_envied{suffix}_keyStr")))?;
 
     let start = idx + needle_bytes.len();
     let end = kernel_data[start..]
         .iter()
         .position(|&b| b == b']')
-        .ok_or_else(|| anyhow!("Unterminated _envied{suffix}_keyStr array"))?;
+        .ok_or(V3Error::ArrayUnterminated)?;
 
-    let text = std::str::from_utf8(&kernel_data[start..start + end])
-        .context("envied array not valid UTF-8")?;
+    let text = std::str::from_utf8(&kernel_data[start..start + end])?;
 
     // Parse integers as i64 to handle XOR-masked values > i32::MAX.
     let mut ints = Vec::new();
@@ -142,9 +139,7 @@ fn parse_envied_array(kernel_data: &[u8], suffix: &str) -> Result<Vec<i64>> {
         if trimmed.is_empty() {
             continue;
         }
-        let val: i64 = trimmed
-            .parse()
-            .map_err(|_| anyhow!("invalid int in envied array: {trimmed}"))?;
+        let val: i64 = trimmed.parse().map_err(V3Error::BadInt)?;
         ints.push(val);
     }
 
@@ -152,21 +147,18 @@ fn parse_envied_array(kernel_data: &[u8], suffix: &str) -> Result<Vec<i64>> {
 }
 
 /// AES-256-CBC decrypt + PKCS7 unpad.
-fn aes_cbc_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
+fn aes_cbc_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, V3Error> {
     if key.len() != 32 {
-        return Err(anyhow!("AES-256 key must be 32 bytes, got {}", key.len()));
+        return Err(V3Error::AesKeyLen(key.len()));
     }
     if iv.len() != 16 {
-        return Err(anyhow!("AES IV must be 16 bytes, got {}", iv.len()));
+        return Err(V3Error::AesIvLen(iv.len()));
     }
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    if data.len() % 16 != 0 {
-        return Err(anyhow!(
-            "ciphertext length {} not a multiple of 16",
-            data.len()
-        ));
+    if !data.len().is_multiple_of(16) {
+        return Err(V3Error::AesBlockLen(data.len()));
     }
 
     use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
@@ -193,13 +185,14 @@ fn aes_cbc_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>> {
     }
 
     // PKCS7 unpad
-    let pad_len = *buf.last().ok_or_else(|| anyhow!("empty plaintext"))? as usize;
+    // Safety: `data` was non-empty and length was multiple of 16, so `last` exists.
+    let pad_len = *buf.last().unwrap() as usize;
     if pad_len == 0 || pad_len > 16 {
-        return Err(anyhow!("invalid PKCS7 padding length: {pad_len}"));
+        return Err(V3Error::InvalidPkcs7);
     }
     let start = buf.len() - pad_len;
     if buf[start..].iter().any(|&b| b as usize != pad_len) {
-        return Err(anyhow!("invalid PKCS7 padding"));
+        return Err(V3Error::InvalidPkcs7);
     }
     buf.truncate(start);
     Ok(buf)
@@ -218,6 +211,6 @@ mod tests {
         let key = create_key("modelegitim", keystr);
         assert_eq!(key.len(), 32);
         assert_eq!(&key[..11], b"modelegitim");
-        assert_eq!(&key[11..32], &keystr[..21]);
+        assert_eq!(&key[11..32], &keystr.as_bytes()[..21]);
     }
 }

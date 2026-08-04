@@ -1,16 +1,17 @@
 //! Fernus `.frns` file format (v2 / newer encryption).
 //!
 //! Newer Fernus books (circa 2023+) drop `.frns` files instead of `.dll`
-//! 
+//!
 use std::io::Cursor;
 use std::num::NonZeroUsize;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Context;
 use base64::Engine;
 use lzma_rs::decompress::raw::{LzmaDecoder, LzmaParams, LzmaProperties};
 use serde::Deserialize;
 
 use super::crypto::{KryCode, KrySWFCrypto};
+use crate::error::FrnsError;
 
 // ---------------------------------------------------------------------------
 // LZMA helpers
@@ -20,12 +21,12 @@ use super::crypto::{KryCode, KrySWFCrypto};
 const LZMA_HEADER_SIZE: usize = 13;
 
 /// Decompress a Flash LZMA stream (13-byte header + raw LZMA1 payload).
-pub fn decompress_flash_lzma(data: &[u8]) -> Result<Vec<u8>> {
+pub fn decompress_flash_lzma(data: &[u8]) -> Result<Vec<u8>, FrnsError> {
     if data.len() < LZMA_HEADER_SIZE {
-        bail!(
-            "LZMA data too short: {} bytes (need ≥ {LZMA_HEADER_SIZE})",
-            data.len()
-        );
+        return Err(FrnsError::LzmaTooShort {
+            got: data.len(),
+            min: LZMA_HEADER_SIZE,
+        });
     }
 
     let props = data[0];
@@ -34,26 +35,30 @@ pub fn decompress_flash_lzma(data: &[u8]) -> Result<Vec<u8>> {
     let lp = (remaining % 5) as u32;
     let pb = (remaining / 5) as u32;
 
-    let dict_size =
-        u32::from_le_bytes(data[1..5].try_into().unwrap());
+    let dict_size = u32::from_le_bytes(data[1..5].try_into().unwrap());
 
-    let uncomp_size =
-        u64::from_le_bytes(data[5..13].try_into().unwrap());
+    let uncomp_size = u64::from_le_bytes(data[5..13].try_into().unwrap());
 
     let properties = LzmaProperties { lc, lp, pb };
     let params = LzmaParams::new(properties, dict_size, Some(uncomp_size));
 
-    let memlimit = NonZeroUsize::new(128 * 1024 * 1024) // 128 MiB — plenty for SWFs
-        .ok_or_else(|| anyhow!("invalid memlimit"))?;
+    // Safety: 128 MiB is a valid NonZeroUsize.
+    let memlimit = NonZeroUsize::new(128 * 1024 * 1024).unwrap();
 
-    let mut decoder = LzmaDecoder::new(params, Some(memlimit.get()))
-        .map_err(|e| anyhow!("LZMA decoder init: {e}"))?;
+    let mut decoder =
+        LzmaDecoder::new(params, Some(memlimit.get())).map_err(|e| FrnsError::Lzma {
+            context: "decoder init",
+            source: e,
+        })?;
 
     let mut input = Cursor::new(&data[LZMA_HEADER_SIZE..]);
     let mut output = Vec::with_capacity(uncomp_size as usize);
     decoder
         .decompress(&mut input, &mut output)
-        .map_err(|e| anyhow!("LZMA decompress: {e}"))?;
+        .map_err(|e| FrnsError::Lzma {
+            context: "decompress",
+            source: e,
+        })?;
 
     Ok(output)
 }
@@ -83,9 +88,12 @@ fn deser_coerce_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Er
     use serde::de::Error;
     let v = serde_json::Value::deserialize(d)?;
     match v {
-        serde_json::Value::Number(n) => n.as_u64().map(|x| x as u32)
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .map(|x| x as u32)
             .ok_or_else(|| Error::custom("frame not a valid u32")),
-        serde_json::Value::String(s) => s.parse::<u32>()
+        serde_json::Value::String(s) => s
+            .parse::<u32>()
             .map_err(|e| Error::custom(format!("frame string not u32: {e}"))),
         _ => Err(Error::custom("frame must be number or string")),
     }
@@ -95,9 +103,11 @@ fn deser_coerce_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Er
     use serde::de::Error;
     let v = serde_json::Value::deserialize(d)?;
     match v {
-        serde_json::Value::Number(n) => n.as_f64()
+        serde_json::Value::Number(n) => n
+            .as_f64()
             .ok_or_else(|| Error::custom("width/height not a valid f64")),
-        serde_json::Value::String(s) => s.parse::<f64>()
+        serde_json::Value::String(s) => s
+            .parse::<f64>()
             .map_err(|e| Error::custom(format!("width/height string not f64: {e}"))),
         _ => Err(Error::custom("width/height must be number or string")),
     }
@@ -107,7 +117,11 @@ fn deser_coerce_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Er
 #[derive(Debug, Clone, Deserialize)]
 pub struct FrnsBook {
     /// Total number of frames in the book.
+    ///
+    /// The frame list itself is authoritative (it may disagree with this count
+    /// for malformed books), so the field is informational only.
     #[serde(rename = "totalFrames")]
+    #[allow(dead_code)]
     pub total_frames: u32,
     /// All frames (sorted by `frame` in the runtime, we keep order as-is).
     pub frames: Vec<FrnsFrame>,
@@ -131,13 +145,16 @@ impl FrnsFrame {
     /// var byte = Base64.decodeToByteArray(str);
     /// byte = kry.decrypte(byte, kkObject);
     /// ```
-    pub fn decrypt(&self, code: &KryCode) -> Result<Vec<u8>> {
+    pub fn decrypt(&self, code: &KryCode) -> Result<Vec<u8>, FrnsError> {
         let xor_key = (code.f1 + code.f2 + code.f3).to_string();
 
         let (part0, part1) = self
             .data
             .split_once(FRAME_SEPARATOR)
-            .ok_or_else(|| anyhow!("frame data missing '{FRAME_SEPARATOR}' separator"))?;
+            .ok_or(FrnsError::Frame {
+                frame: self.frame,
+                message: "data missing '+/=' separator",
+            })?;
 
         // decode(part0, xor_key) → base64 → XOR → UTF-8
         let decoded_part0 = xor_decode_b64(part0, &xor_key)?;
@@ -153,9 +170,12 @@ impl FrnsFrame {
 
         let mut encrypted = base64::engine::general_purpose::STANDARD
             .decode(&filtered)
-            .map_err(|e| anyhow!("frame base64 decode: {e}"))?;
+            .map_err(|e| FrnsError::Base64 {
+                context: "frame",
+                source: e,
+            })?;
 
-        KrySWFCrypto::decrypt(&mut encrypted, code)?;
+        KrySWFCrypto::decrypt(&mut encrypted, code);
 
         Ok(encrypted)
     }
@@ -169,10 +189,13 @@ impl FrnsFrame {
 /// out.position = 0;
 /// return out.readUTFBytes(out.length);
 /// ```
-fn xor_decode_b64(b64: &str, key: &str) -> Result<String> {
+fn xor_decode_b64(b64: &str, key: &str) -> Result<String, FrnsError> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
-        .map_err(|e| anyhow!("xor_decode base64: {e}"))?;
+        .map_err(|e| FrnsError::Base64 {
+            context: "xor_decode",
+            source: e,
+        })?;
 
     let key_bytes = key.as_bytes();
     let xored: Vec<u8> = bytes
@@ -181,7 +204,7 @@ fn xor_decode_b64(b64: &str, key: &str) -> Result<String> {
         .map(|(i, &b)| b ^ key_bytes[i % key_bytes.len()])
         .collect();
 
-    String::from_utf8(xored).map_err(|e| anyhow!("xor_decode utf8: {e}"))
+    String::from_utf8(xored).map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -193,11 +216,10 @@ fn xor_decode_b64(b64: &str, key: &str) -> Result<String> {
 ///
 /// Returns the decrypted SWF bytes together with the frame metadata (width,
 /// height, frame number) so the caller can patch SWF headers and render.
-pub fn load_and_decrypt_book(data: &[u8], code: &KryCode) -> Result<Vec<DecryptedFrame>> {
+pub fn load_and_decrypt_book(data: &[u8], code: &KryCode) -> anyhow::Result<Vec<DecryptedFrame>> {
     let json_bytes = decompress_flash_lzma(data).context("decompress frns book")?;
     let json_str = std::str::from_utf8(&json_bytes).context("frns JSON utf8")?;
-    let book: FrnsBook =
-        serde_json::from_str(json_str).context("parse frns book JSON")?;
+    let book: FrnsBook = serde_json::from_str(json_str).context("parse frns book JSON")?;
 
     let mut frames = Vec::with_capacity(book.frames.len());
     for f in &book.frames {

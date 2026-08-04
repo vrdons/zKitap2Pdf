@@ -15,8 +15,12 @@ pub fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 pub fn has_enigma(exe_path: &Path) -> bool {
-    let Ok(raw) = fs::read(exe_path) else { return false };
-    let Ok(pe) = crate::enigma::PeInfo::parse(&raw) else { return false };
+    let Ok(raw) = fs::read(exe_path) else {
+        return false;
+    };
+    let Ok(pe) = crate::enigma::PeInfo::parse(&raw) else {
+        return false;
+    };
     let names: Vec<&str> = pe.sections.iter().map(|s| s.name.as_str()).collect();
     names.contains(&".enigma1")
 }

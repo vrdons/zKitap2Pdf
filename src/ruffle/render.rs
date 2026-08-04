@@ -1,18 +1,24 @@
-//! SWF → PDF rendering: receives patched SWF file paths from the pipeline,
-//! spawns all render threads in parallel, then drains frames by SWF order
-//! (sysb → sysm → ...) so JPEG page order is correct.
-use std::fs;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+//! SWF → PDF rendering (v1/v2 pipelines).
+//!
+//! Receives patched SWF file paths and renders them through the single
+//! persistent GPU worker defined in [`crate::ruffle::exporter`]. Pages arrive
+//! as already-JPEG-encoded byte buffers, so this module only has to:
+//!   1. queue jobs grouped by SWF (sysb content first, then masks),
+//!   2. forward each page to the shared PDF writer in [`crate::pdf`].
+//!
+//! Crucially there is **no disk round-trip**: the previous implementation wrote
+//! every page to a temp JPEG file and re-read it for oxidize-pdf. That doubled
+//! I/O and forced a temp dir lifetime to bracket the whole run.
 
-use anyhow::{Context, Result, anyhow};
-use image::{DynamicImage, ImageFormat};
-use oxidize_pdf::{Document, Image, Page};
-use tempfile::TempDir;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use image::DynamicImage;
 
 use crate::cli::Files;
-use crate::config::PDF_AUTHOR;
-use crate::ruffle::exporter::Exporter;
+use crate::image_proc::UpscaleOpts;
+use crate::pdf::{PageInput, PdfOutput, write_pages};
+use crate::ruffle::exporter::{Exporter, RenderedPage};
 
 /// Metadata for a single patched SWF ready to render.
 pub struct SwfInput {
@@ -26,109 +32,134 @@ pub struct SwfInput {
     pub height: f64,
 }
 
-/// Render the supplied patched SWF files into a single PDF.
+/// Stream `swf_inputs` (sorted sysb-first) into a single PDF.
 ///
-/// A single persistent render worker thread is used for all SWFs.  Jobs are
-/// queued sequentially so the GLES context is never shared across threads,
-/// avoiding wgpu deadlocks on Linux.
-///
-/// Because `swf_inputs` is sorted sysb-first, pages from the content SWF
-/// always precede mask pages in the PDF.
+/// Because Ruffle/WGPU owns a GPU context that cannot be shared across threads,
+/// all rendering happens on one worker. Throughput is improved instead by doing
+/// the JPEG encoding on that same worker (see [`crate::ruffle::exporter`]) and
+/// by writing the PDF incrementally via [`crate::pdf::write_pages`].
 pub fn render(
     exporter: &Exporter,
     swf_inputs: &[SwfInput],
     file_info: &Files,
-    scale: f64,
+    upscale: &UpscaleOpts,
 ) -> Result<()> {
-    let mut doc = Document::new();
-    doc.set_title(&file_info.filename);
-    doc.set_author(PDF_AUTHOR);
-
-    let tmp = TempDir::new().context("create render temp dir")?;
-
-    // A single worker that processes jobs one-at-a-time on its thread.
     let worker = exporter.spawn_worker();
 
-    let mut jpg_seq: u64 = 0;
+    // Queue every SWF up-front; the worker processes them one at a time on its
+    // own thread. Order is preserved, so sysb (content) precedes sysm (mask).
+    let job_rx_list: Vec<_> = swf_inputs
+        .iter()
+        .map(|input| {
+            tracing::info!(
+                swf = %input.name,
+                dims = format!("{}x{}", input.width as u32, input.height as u32),
+                "queued for render"
+            );
+            worker
+                .send_job(input.path.clone())
+                .with_context(|| format!("queueing render job for {}", input.name))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let total_swf = swf_inputs.len();
     let mut total_pages = 0u32;
+    let pages = PageStream {
+        receivers: job_rx_list,
+        swf_names: swf_inputs.iter().map(|s| s.name.clone()).collect(),
+        swf_index: 0,
+        cur_failures: 0,
+        total_swf,
+    };
 
-    for (idx, input) in swf_inputs.iter().enumerate() {
-        let scaled_width = (input.width * scale).round();
-        let scaled_height = (input.height * scale).round();
+    let out = PdfOutput {
+        path: file_info.output.clone(),
+        title: file_info.filename.clone(),
+    };
+    write_pages(
+        pages.filter_map(|res| match res {
+            Ok(page) => {
+                total_pages += 1;
+                Some(PageInput::new(decode_jpeg_as_image(&page.jpeg)))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "frame dropped");
+                None
+            }
+        }),
+        &out,
+        upscale,
+    )?;
 
-        tracing::info!(
-            index = idx + 1,
-            total = swf_inputs.len(),
-            swf = %input.name,
-            scale = format!("{scaled_width:.0}x{scaled_height:.0}"),
-            "processing"
-        );
+    // Shut down the worker (job_tx is dropped → worker loop ends). A join
+    // error is only logged, not fatal — the PDF is already fully written.
+    if let Err(e) = worker.join() {
+        tracing::warn!(error = ?e, "render worker join error");
+    }
 
-        let rx = worker
-            .send_job(input.path.clone())
-            .with_context(|| format!("queueing render job for {}", input.name))?;
+    tracing::info!(pages = total_pages, "render PDF finished");
+    Ok(())
+}
 
-        let mut rendered = 0u32;
-        for received in rx {
-            match received {
-                Ok((_frame_idx, rgba)) => {
-                    let jpg_path = tmp.path().join(format!("p_{:08}.jpg", jpg_seq));
-                    jpg_seq += 1;
-                    save_jpeg(&rgba, &jpg_path)?;
-                    drop(rgba);
-                    add_pdf_page(&mut doc, &jpg_path, scaled_width, scaled_height)?;
-                    rendered += 1;
+/// Decode the JPEG bytes produced by the render worker back into a
+/// `DynamicImage` for the shared `pdf` module (which re-embeds JPEG).
+///
+/// This round-trip exists only because `pdf.rs` works on `DynamicImage` to stay
+/// uniform across the v1/v2/v3 paths. The cost is small relative to the GPU
+/// render; a single decode failure yields a 1×1 blank page rather than aborting
+/// the whole multi-hundred-page book.
+fn decode_jpeg_as_image(jpeg: &[u8]) -> DynamicImage {
+    match image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg) {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to re-decode worker JPEG; emitting blank");
+            DynamicImage::ImageRgb8(image::RgbImage::new(1, 1))
+        }
+    }
+}
+
+/// Lazy iterator over [`RenderedPage`]s produced by the worker, advancing
+/// through the queued SWFs one at a time.
+struct PageStream {
+    receivers: Vec<std::sync::mpsc::Receiver<Result<RenderedPage>>>,
+    swf_names: Vec<String>,
+    swf_index: usize,
+    cur_failures: u32,
+    #[allow(dead_code)]
+    total_swf: usize,
+}
+
+impl Iterator for PageStream {
+    type Item = Result<RenderedPage>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.swf_index >= self.receivers.len() {
+                return None;
+            }
+            let rx = &self.receivers[self.swf_index];
+            match rx.recv() {
+                Ok(Ok(page)) => return Some(Ok(page)),
+                Ok(Err(e)) => {
+                    self.cur_failures += 1;
+                    return Some(Err(e));
                 }
-                Err(e) => {
-                    tracing::warn!(swf = %input.name, error = %e, "frame dropped");
+                Err(std::sync::mpsc::RecvError) => {
+                    // This SWF's job is done; advance to the next.
+                    let name = &self.swf_names[self.swf_index];
+                    if self.cur_failures > 0 {
+                        tracing::warn!(
+                            swf = %name,
+                            dropped = self.cur_failures,
+                            "SWF had failed/dropped frames"
+                        );
+                    } else {
+                        tracing::debug!(swf = %name, "SWF stream complete");
+                    }
+                    self.cur_failures = 0;
+                    self.swf_index += 1;
                 }
             }
         }
-
-        total_pages += rendered;
-        tracing::info!(pages = rendered, swf = %input.name, "captured");
     }
-
-    // Shut down the worker (job_tx is dropped → worker loop ends).
-    worker
-        .join()
-        .map_err(|e| anyhow!("render worker panicked: {e:?}"))?;
-
-    tracing::info!(pages = total_pages, "finished");
-    tracing::info!(output = %file_info.output.display(), "writing PDF");
-
-    if let Some(parent) = file_info.output.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating output dir {}", parent.display()))?;
-    }
-    doc.save(&file_info.output)
-        .with_context(|| format!("saving {}", file_info.output.display()))?;
-
-    Ok(())
-}
-
-/// Encode a single RGBA frame as a JPEG file on disk.
-fn save_jpeg(rgba: &image::RgbaImage, path: &Path) -> Result<()> {
-    let rgb = DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
-    let file = fs::File::create(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    rgb.write_to(&mut writer, ImageFormat::Jpeg)
-        .context("encode JPEG")?;
-    writer.flush().context("flush JPEG")?;
-    Ok(())
-}
-
-/// Read a JPEG from disk and append it as a PDF page.
-fn add_pdf_page(doc: &mut Document, jpg_path: &Path, width: f64, height: f64) -> Result<()> {
-    let pdf_image = Image::from_jpeg_file(jpg_path)
-        .with_context(|| format!("parse jpeg for pdf: {}", jpg_path.display()))?;
-
-    let mut page = Page::new(width, height);
-    page.add_image("img", pdf_image);
-    if let Err(e) = page.draw_image("img", 0.0, 0.0, width, height) {
-        tracing::warn!(error = %e, "pdf draw_image");
-    }
-    doc.add_page(page);
-    Ok(())
 }

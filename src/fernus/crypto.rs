@@ -1,11 +1,11 @@
 //! Fernus encryption helpers for the KK and KrySWFCrypto formats.
 
-use anyhow::{Result, anyhow};
 use base64::Engine;
 use blowfish::Blowfish;
 use blowfish::cipher::{Block, BlockCipherDecrypt, KeyInit};
 
-/// Default publisher key used as a fallback when the runtime bundle does not expose one.
+pub use crate::error::CryptoError;
+
 /// Default publisher (`publisher.kxk`) decryption key.
 pub const DEFAULT_PUBLISHER_KEY: &str = "pub1isher1l0O";
 
@@ -19,7 +19,7 @@ pub struct KK;
 
 impl KK {
     /// Apply the fd2 pre-processing step when requested, then decrypt via Blowfish-ECB.
-    pub fn fd1(data: &str, key_str: &str, apply_fd2: bool) -> Result<String> {
+    pub fn fd1(data: &str, key_str: &str, apply_fd2: bool) -> Result<String, CryptoError> {
         let decoded: std::borrow::Cow<'_, str> = if apply_fd2 {
             Self::fd2(data, key_str)?.into()
         } else {
@@ -35,7 +35,10 @@ impl KK {
 
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&filtered)
-            .map_err(|e| anyhow!("fd1 base64: {e}"))?;
+            .map_err(|e| CryptoError::Base64 {
+                context: "fd1",
+                source: e,
+            })?;
 
         let key_str_bytes = key_str.as_bytes();
         let mut key_bytes = Vec::with_capacity(key_str_bytes.len());
@@ -45,21 +48,30 @@ impl KK {
         }
 
         let decrypted = Self::blowfish_ecb_decrypt(&bytes, &key_bytes)?;
-        String::from_utf8(decrypted).map_err(|e| anyhow!("fd1 utf8: {e}"))
+        String::from_utf8(decrypted).map_err(|e| CryptoError::Utf8 {
+            context: "fd1",
+            source: e,
+        })
     }
 
     /// Reverse the bytes, base64-decode, and XOR against a repeating key.
-    pub fn fd2(input: &str, key: &str) -> Result<String> {
+    pub fn fd2(input: &str, key: &str) -> Result<String, CryptoError> {
         let bytes = input.as_bytes();
         let mut reversed: Vec<u8> = Vec::with_capacity(bytes.len());
         reversed.extend(bytes.iter().rev());
 
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&reversed)
-            .map_err(|e| anyhow!("fd2 base64: {e}"))?;
+            .map_err(|e| CryptoError::Base64 {
+                context: "fd2",
+                source: e,
+            })?;
 
         let xored = Self::apply_xor(&decoded, key);
-        String::from_utf8(xored).map_err(|e| anyhow!("fd2 utf8: {e}"))
+        String::from_utf8(xored).map_err(|e| CryptoError::Utf8 {
+            context: "fd2",
+            source: e,
+        })
     }
 
     pub fn apply_xor(input: &[u8], key: &str) -> Vec<u8> {
@@ -74,19 +86,18 @@ impl KK {
             .collect()
     }
 
-    fn blowfish_ecb_decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
+    fn blowfish_ecb_decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if key.is_empty() {
-            return Err(anyhow!("empty Blowfish key"));
+            return Err(CryptoError::InvalidKey("empty key"));
         }
         if !data.len().is_multiple_of(8) {
-            return Err(anyhow!("ciphertext len {} not multiple of 8", data.len()));
+            return Err(CryptoError::BadCiphertextLen(data.len()));
         }
         if data.is_empty() {
             return Ok(Vec::new());
         }
 
-        let bf = <Blowfish as KeyInit>::new_from_slice(key)
-            .map_err(|e| anyhow!("invalid Blowfish key: {e:?}"))?;
+        let bf = <Blowfish as KeyInit>::new_from_slice(key)?;
 
         let mut result = data.to_vec();
         for chunk in result.chunks_exact_mut(8) {
@@ -94,16 +105,15 @@ impl KK {
             bf.decrypt_block(block);
         }
 
-        let pad_len = *result
-            .last()
-            .ok_or_else(|| anyhow!("empty plaintext after decrypt"))?
-            as usize;
+        // Safety: data is non-empty and length is a multiple of 8, so `last`
+        // is always present.
+        let pad_len = *result.last().unwrap() as usize;
         if pad_len == 0 || pad_len > 8 {
-            return Err(anyhow!("invalid PKCS5 padding length: {pad_len}"));
+            return Err(CryptoError::InvalidPadding(pad_len));
         }
         let start = result.len() - pad_len;
         if result[start..].iter().any(|&b| b as usize != pad_len) {
-            return Err(anyhow!("invalid PKCS5 padding"));
+            return Err(CryptoError::InvalidPadding(pad_len));
         }
         result.truncate(start);
         Ok(result)
@@ -128,7 +138,10 @@ pub struct KrySWFCrypto;
 
 impl KrySWFCrypto {
     /// Decrypt SWF bytes in place. Arithmetic wraps modulo 256.
-    pub fn decrypt(bytes: &mut [u8], code: &KryCode) -> Result<()> {
+    ///
+    /// Infallible: the scramble is a pure byte transform over already-sized
+    /// slices and cannot fail. Kept as a method for symmetry with the AS3 API.
+    pub fn decrypt(bytes: &mut [u8], code: &KryCode) {
         Self::separate_bytes(bytes, 10000, 11000, code.f1, code.f2);
         Self::separate_bytes(bytes, 5000, 5500, code.f3, code.f1);
         Self::separate_bytes(bytes, 850, 1500, code.f2, code.f3);
@@ -150,7 +163,6 @@ impl KrySWFCrypto {
                 *b = b.wrapping_sub(val);
             }
         }
-        Ok(())
     }
 
     fn separate_bytes(bytes: &mut [u8], s_index: i32, e_index: i32, n1: i32, n2: i32) {
@@ -173,29 +185,36 @@ impl KrySWFCrypto {
 }
 
 /// Parse a Fernus code like "33x20x10" or "33_20_10" into a KryCode.
-pub fn parse_kry_code(fernus_code_decrypted: &str, pkxkname_len: usize) -> Result<KryCode> {
+pub fn parse_kry_code(
+    fernus_code_decrypted: &str,
+    pkxkname_len: usize,
+) -> Result<KryCode, CryptoError> {
     let sep = if fernus_code_decrypted.contains('x') {
         'x'
     } else if fernus_code_decrypted.contains('_') {
         '_'
     } else {
-        return Err(anyhow!("cannot parse fernusCode: {fernus_code_decrypted}"));
+        return Err(CryptoError::InvalidFernusCode(format!(
+            "missing 'x'/'_' separator: {fernus_code_decrypted}"
+        )));
     };
 
     let mut parts = fernus_code_decrypted.split(sep);
-    let mut parse_part = || -> Result<i32> {
+    let mut parse_part = || -> Result<i32, CryptoError> {
         let s = parts
             .next()
-            .ok_or_else(|| anyhow!("fernusCode needs 3 parts"))?;
+            .ok_or_else(|| CryptoError::InvalidFernusCode("needs 3 parts".to_string()))?;
         s.trim()
             .parse::<i32>()
-            .map_err(|_| anyhow!("invalid fernusCode part: {s}"))
+            .map_err(|_| CryptoError::InvalidFernusCode(format!("invalid part: {s}")))
     };
     let f1 = parse_part()?;
     let f2 = parse_part()?;
     let f3 = parse_part()?;
     if parts.next().is_some() {
-        return Err(anyhow!("fernusCode should have exactly 3 parts"));
+        return Err(CryptoError::InvalidFernusCode(
+            "should have exactly 3 parts".to_string(),
+        ));
     }
 
     let pkxk = pkxkname_len as i32;

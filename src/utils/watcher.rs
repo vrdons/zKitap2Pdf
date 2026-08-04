@@ -52,8 +52,9 @@ fn handle_event(
         };
         let mut in_process = false;
 
-        if (name.ends_with(".dll") || name.ends_with(".frns") || name.ends_with(".kxk")) &&
-         event.kind == EventKind::Access(AccessKind::Close(AccessMode::Write)) {
+        if (name.ends_with(".dll") || name.ends_with(".frns") || name.ends_with(".kxk"))
+            && event.kind == EventKind::Access(AccessKind::Close(AccessMode::Write))
+        {
             in_process = true;
         }
 

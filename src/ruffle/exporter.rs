@@ -10,9 +10,10 @@ use ruffle_render_wgpu::{
 };
 use std::{
     any::Any,
+    io::Cursor,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
     thread,
 };
 
@@ -26,11 +27,23 @@ pub struct Exporter {
     scale: f64,
 }
 
+/// One ready-to-embed page frame, already JPEG-encoded by the render worker so
+/// the consumer never has to touch raw pixel buffers or spill to disk.
+pub struct RenderedPage {
+    /// Zero-based frame index within the source SWF.
+    // Kept for diagnostics (which source page failed to encode); not consumed
+    // by the PDF path, which relies on channel ordering instead.
+    #[allow(dead_code)]
+    pub frame: u16,
+    /// JPEG-encoded image bytes (DCT stream), directly embeddable by oxidize-pdf.
+    pub jpeg: Vec<u8>,
+}
+
 /// A single job for the persistent render worker.
 pub struct RenderJob {
     pub path: PathBuf,
-    /// Per-job channel — the worker sends captured frames (or errors) here.
-    pub tx: mpsc::SyncSender<Result<(u16, RgbaImage)>>,
+    /// Per-job channel — the worker sends JPEG-encoded pages (or errors) here.
+    pub tx: mpsc::SyncSender<Result<RenderedPage>>,
 }
 
 /// Handle returned by [`Exporter::spawn_worker`].
@@ -41,9 +54,12 @@ pub struct Worker {
 
 impl Worker {
     /// Queue a SWF for rendering. Returns the per-job receiver that yields
-    /// captured frames in order.  Blocks only if the worker's queue is full.
-    pub fn send_job(&self, path: PathBuf) -> Result<mpsc::Receiver<Result<(u16, RgbaImage)>>> {
-        let (tx, rx) = mpsc::sync_channel(16);
+    /// JPEG-encoded pages in order.  Blocks only if the worker's queue is full.
+    pub fn send_job(&self, path: PathBuf) -> Result<mpsc::Receiver<Result<RenderedPage>>> {
+        // A bounded per-job channel (4) provides mild back-pressure so a book
+        // with hundreds of pages doesn't queue every encoded JPEG in RAM before
+        // the PDF writer drains it.
+        let (tx, rx) = mpsc::sync_channel(4);
         self.job_tx
             .send(RenderJob { path, tx })
             .map_err(|_| anyhow!("render worker has died"))?;
@@ -103,7 +119,7 @@ fn render_frames(
     descriptors: Arc<Descriptors>,
     scale: f64,
     path: &Path,
-    tx: mpsc::SyncSender<Result<(u16, RgbaImage)>>,
+    tx: mpsc::SyncSender<Result<RenderedPage>>,
 ) {
     let send_err = |frame: u16, msg: &str| {
         let _ = tx.send(Err(anyhow!("frame {frame}: {msg}")));
@@ -143,10 +159,10 @@ fn render_frames(
         .with_viewport_dimensions(width, height, scale)
         .build();
 
-    tracing::info!(total_frames, "capturing frames");
+    tracing::info!(total_frames, %width, %height, "capturing frames");
 
     for i in 0..total_frames {
-        tracing::info!(frame = i + 1, total = total_frames, "running frame");
+        tracing::trace!(frame = i + 1, total = total_frames, "running frame");
         let capture_attempt = {
             let mut locked_player = match player.lock() {
                 Ok(pl) => pl,
@@ -169,10 +185,20 @@ fn render_frames(
         };
 
         match capture_attempt {
-            Ok(Ok(Some(img))) => {
-                tracing::info!(page = i + 1, total = total_frames, "captured");
-                if tx.send(Ok((i, img))).is_err() {
-                    break; // consumer dropped
+            Ok(Ok(Some(rgba))) => {
+                // Encode to JPEG *on the render worker* so the consumer thread
+                // only deals with compact DCT bytes — no big RGBA buffers
+                // crossing the channel and no disk spill.
+                match encode_jpeg(&rgba) {
+                    Ok(jpeg) => {
+                        if tx.send(Ok(RenderedPage { frame: i, jpeg })).is_err() {
+                            break; // consumer dropped
+                        }
+                        if (i + 1) % 25 == 0 || i + 1 == total_frames {
+                            tracing::info!(page = i + 1, total = total_frames, "captured");
+                        }
+                    }
+                    Err(e) => send_err(i, &format!("jpeg encode: {e}")),
                 }
             }
             Ok(Ok(None)) => {
@@ -186,4 +212,16 @@ fn render_frames(
             }
         }
     }
+}
+
+/// In-memory JPEG encoding of a captured RGBA frame.
+///
+/// Runs on the render worker thread, keeping the (relatively expensive) pixel
+/// → DCT conversion off the PDF-writer thread and avoiding any disk I/O.
+fn encode_jpeg(rgba: &RgbaImage) -> Result<Vec<u8>> {
+    let rgb = image::DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
+    let mut buf = Vec::with_capacity((rgb.width() as usize) * (rgb.height() as usize) / 4);
+    rgb.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+        .map_err(|e| anyhow!("jpeg encode: {e}"))?;
+    Ok(buf)
 }

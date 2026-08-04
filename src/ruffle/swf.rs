@@ -1,8 +1,9 @@
 //! SWF byte-level helpers: format normalisation, single-pass analysis, header patching.
 use std::io::{Cursor, Read};
 
-use anyhow::{Context, Result, anyhow, bail};
 use swf::{Header, Rectangle, SwfBuf, Tag, Twips, parse_swf, write::write_swf_raw_tags};
+
+pub use crate::error::SwfError;
 
 /// Minimum bytes needed to inspect a SWF signature + declared length field.
 const SWF_HEADER_MIN: usize = 8;
@@ -16,9 +17,9 @@ const SWF_HEADER_MIN: usize = 8;
 ///
 /// This used to live, byte-for-byte identical, in both `export.rs
 /// ::convert_to_fws` and `fernus/assets.rs::decrypt_pages`.
-pub fn to_fws(data: &[u8]) -> Result<Vec<u8>> {
+pub fn to_fws(data: &[u8]) -> Result<Vec<u8>, SwfError> {
     if data.len() < SWF_HEADER_MIN {
-        bail!("SWF too short: {} bytes", data.len());
+        return Err(SwfError::TooShort(data.len()));
     }
 
     let declared_total = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
@@ -29,9 +30,7 @@ pub fn to_fws(data: &[u8]) -> Result<Vec<u8>> {
         b"CWS" | b"cws" => {
             let mut decoder = flate2::read::ZlibDecoder::new(&data[SWF_HEADER_MIN..]);
             let mut body = Vec::with_capacity(declared_total.saturating_sub(SWF_HEADER_MIN));
-            decoder
-                .read_to_end(&mut body)
-                .with_context(|| "zlib inflate failed")?;
+            decoder.read_to_end(&mut body).map_err(SwfError::Zlib)?;
 
             let mut fws = Vec::with_capacity(SWF_HEADER_MIN + body.len());
             fws.extend_from_slice(b"FWS");
@@ -40,10 +39,10 @@ pub fn to_fws(data: &[u8]) -> Result<Vec<u8>> {
             fws.extend_from_slice(&body);
             Ok(fws)
         }
-        b"ZWS" | b"zws" => bail!("ZWS (LZMA) SWF is not supported"),
+        b"ZWS" | b"zws" => Err(SwfError::UnsupportedZws),
         sig => {
-            let sig_display = std::str::from_utf8(sig).unwrap_or("<non-utf8>");
-            bail!("not a SWF signature: {sig_display:?}")
+            let sig_display = std::str::from_utf8(sig).unwrap_or("<non-utf8>").to_string();
+            Err(SwfError::BadSignature(sig_display))
         }
     }
 }
@@ -61,6 +60,10 @@ pub struct SwfView {
     /// Real pixel height (max of DefineShape y_max, clamped to header stage size).
     pub height: f64,
     /// Declared frame count from the SWF header.
+    ///
+    /// Surfaced for diagnostics; the renderer drives the loop by the movie's
+    /// own frame count, so this isn't read on the hot path.
+    #[allow(dead_code)]
     pub frame_count: u16,
 }
 
@@ -68,20 +71,17 @@ pub struct SwfView {
 ///
 /// This is a fast-path for when the caller already knows the correct
 /// width/height (e.g. from FRNS frame metadata).
-pub fn decompress_swf_quick(data: &[u8]) -> Result<SwfBuf> {
-    swf::decompress_swf(&mut Cursor::new(data))
-        .map_err(|e| anyhow!("failed to decompress SWF: {e}"))
-        .context("swf decompress quick")
+pub fn decompress_swf_quick(data: &[u8]) -> Result<SwfBuf, SwfError> {
+    swf::decompress_swf(&mut Cursor::new(data)).map_err(|e| SwfError::Decompress(e.to_string()))
 }
 
 /// Decompress the SWF and extract its metadata plus the reusable buffer.
 ///
 /// The returned [`SwfBuf`] can be passed straight to [`patch`].
-pub fn load(data: &[u8]) -> Result<(SwfBuf, SwfView)> {
+pub fn load(data: &[u8]) -> Result<(SwfBuf, SwfView), SwfError> {
     let buf = swf::decompress_swf(&mut Cursor::new(data))
-        .map_err(|e| anyhow!("failed to decompress SWF: {e}"))
-        .context("swf load")?;
-    let parsed = parse_swf(&buf).context("swf parse")?;
+        .map_err(|e| SwfError::Decompress(e.to_string()))?;
+    let parsed = parse_swf(&buf).map_err(|e| SwfError::Parse(e.to_string()))?;
 
     let mut width = parsed.header.stage_size().x_max.to_pixels();
     let mut height = parsed.header.stage_size().y_max.to_pixels();
@@ -105,12 +105,18 @@ pub fn load(data: &[u8]) -> Result<(SwfBuf, SwfView)> {
 ///
 /// `width`/`height` must be positive finite values. The compressed tag stream
 /// is left untouched; only the header rectangle is rewritten.
-pub fn patch(file: SwfBuf, width: f64, height: f64) -> Result<Vec<u8>> {
+pub fn patch(file: SwfBuf, width: f64, height: f64) -> Result<Vec<u8>, SwfError> {
     if !width.is_finite() || width <= 0.0 {
-        bail!("invalid patch width: {width} (must be positive finite)");
+        return Err(SwfError::BadPatchDim {
+            dim: width,
+            which: "width",
+        });
     }
     if !height.is_finite() || height <= 0.0 {
-        bail!("invalid patch height: {height} (must be positive finite)");
+        return Err(SwfError::BadPatchDim {
+            dim: height,
+            which: "height",
+        });
     }
 
     let header = Header {
@@ -127,7 +133,8 @@ pub fn patch(file: SwfBuf, width: f64, height: f64) -> Result<Vec<u8>> {
     };
 
     let mut out = Cursor::new(Vec::<u8>::new());
-    write_swf_raw_tags(&header, &file.data, &mut out).context("swf re-encode")?;
+    write_swf_raw_tags(&header, &file.data, &mut out)
+        .map_err(|e| SwfError::Reencode(e.to_string()))?;
     Ok(out.into_inner())
 }
 
