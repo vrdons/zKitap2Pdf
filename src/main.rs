@@ -6,6 +6,7 @@
 
 mod cli;
 mod config;
+mod enigma;
 mod fernus;
 mod pipeline;
 mod ruffle;

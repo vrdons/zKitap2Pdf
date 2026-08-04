@@ -1,6 +1,6 @@
 //! Conversion pipeline orchestration.
 //!
-//! Supports two Fernus formats transparently:
+//! Supports three Fernus formats transparently:
 //!
 //! **V1 (.dll):** Each DLL is one multi-frame SWF, decrypted via KrySWFCrypto
 //!   or KK::fd1.
@@ -9,12 +9,16 @@
 //!   SWF data. Each frame is independently XOR-decoded, base64-decoded, then
 //!   KrySWFCrypto-decrypted into a single-frame CWS SWF.
 //!
+//! **V3 (Enigma + Flutter):** EXE packed with Enigma Virtual Box containing
+//!   Flutter/Dart assets (kernel_blob.bin + encrypted webp pages). Decrypts
+//!   via envied XOR → AES-256-CBC and converts webp → PDF.
+//!
 //! KryCode is resolved from `sysd.frns` / `sysd.dll` / `publisher.kxk`,
 //! falling back to the verified `{33, 20, 10}` default.
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use tempfile::TempDir;
@@ -23,13 +27,19 @@ use crate::cli::Files;
 use crate::fernus::assets::PublisherConfig;
 use crate::fernus::crypto::{DEFAULT_KRY_CODE, DEFAULT_PUBLISHER_KEY, KK, KryCode, KrySWFCrypto};
 use crate::fernus::frns::{self, DecryptedFrame};
+use crate::fernus::v3;
 use crate::ruffle::exporter::Exporter;
 use crate::ruffle::render::{SwfInput, render as render_pdf};
 use crate::ruffle::swf;
 use crate::utils::{self, process, watcher};
 
-/// Process one EXE end-to-end.
+/// Process one EXE end-to-end. Auto-detects v1/v2 vs v3 format.
 pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
+    if utils::has_enigma(&file.input) {
+        tracing::info!("v3 format detected (Enigma + Flutter)");
+        return handle_v3(file, scale);
+    }
+
     let _child = process::execute_exe(&file.input)?;
 
     let temp_path = process::temp_path()?;
@@ -98,6 +108,264 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, scale: f64) -> Result<()> {
 
     swf_inputs.sort_by_key(|input| !input.name.contains("sysb"));
     render_pdf(exporter, &swf_inputs, file, scale)
+}
+
+/// Process a v3 Flutter + Enigma EXE.
+fn handle_v3(file: &Files, _scale: f64) -> Result<()> {
+    // Step 1: Unpack Enigma VFS
+    tracing::info!("[1/6] Unpacking Enigma VFS...");
+    let extracted = crate::enigma::unpack(&file.input).context("Enigma unpack failed")?;
+    tracing::info!(file_count = extracted.len(), "VFS extracted");
+
+    // Build lookup by path
+    let lookup: HashMap<&str, &[u8]> = extracted
+        .iter()
+        .map(|f| (f.path.as_str(), f.data.as_slice()))
+        .collect();
+
+    // Debug: dump VFS file list
+    tracing::debug!("VFS paths:");
+    for path in lookup.keys() {
+        let data = lookup[path];
+        tracing::debug!(path, len = data.len(), first_bytes = ?&data[..data.len().min(16)]);
+    }
+
+    // Step 2: Extract keystr & IV from kernel_blob.bin
+    tracing::info!("[2/6] Extracting keystr & IV from kernel_blob.bin...");
+    let kernel = lookup
+        .get("data/flutter_assets/kernel_blob.bin")
+        .or_else(|| lookup.get("data\\flutter_assets\\kernel_blob.bin"))
+        .ok_or_else(|| anyhow!("kernel_blob.bin not found in VFS"))?;
+
+    tracing::debug!(kernel_len = kernel.len(), kernel_first = ?&kernel[..kernel.len().min(64)]);
+    // Check if kernel starts with a known header
+    if let Ok(s) = std::str::from_utf8(&kernel[..kernel.len().min(200)]) {
+        tracing::debug!(kernel_preview = %s);
+    }
+
+    let keystr = v3::extract_keystr(kernel).context("extract keystr")?;
+    let iv_str = v3::extract_iv(kernel).context("extract IV")?;
+    tracing::info!(keystr = %keystr, iv = %iv_str, "credentials extracted");
+
+    let iv = iv_str.as_bytes();
+    let keystr_bytes = keystr.as_bytes();
+
+    // Step 3: Decrypt publisher.json → fernusCode
+    tracing::info!("[3/6] Decrypting publisher.json...");
+    let pub_enc = lookup
+        .get("publisher/publisher.json")
+        .or_else(|| lookup.get("publisher\\publisher.json"))
+        .ok_or_else(|| anyhow!("publisher.json not found in VFS"))?;
+    let pub_enc_str = std::str::from_utf8(pub_enc).context("publisher.json not UTF-8")?;
+
+    let pub_json_bytes = v3::decrypt_string(pub_enc_str.trim(), keystr_bytes, iv)
+        .context("decrypt publisher.json")?;
+    let pub_json_str = String::from_utf8(pub_json_bytes).context("publisher.json not UTF-8")?;
+
+    let pub_cfg: serde_json::Value =
+        serde_json::from_str(&pub_json_str).context("publisher.json parse")?;
+
+    let fernus_code_enc = pub_cfg["fernusCode"]
+        .as_str()
+        .ok_or_else(|| anyhow!("fernusCode not found in publisher.json"))?;
+    let fernus_code = String::from_utf8(
+        v3::decrypt_string(fernus_code_enc, keystr_bytes, iv)
+            .context("decrypt fernusCode")?,
+    )
+    .context("fernusCode not UTF-8")?;
+
+    tracing::info!(fernus_code = %fernus_code, "fernusCode decrypted");
+
+
+    // Step 4: Create book key
+    tracing::info!("[4/6] Creating book key...");
+    let book_key = v3::create_key(&fernus_code, &keystr);
+    tracing::info!(book_key_len = book_key.len(), "book key ready");
+
+    // Step 5: Decrypt book.json
+    tracing::info!("[5/6] Decrypting book metadata & assets...");
+    let book_enc = lookup
+        .get("publisher/book/book.json")
+        .or_else(|| lookup.get("publisher\\book\\book.json"))
+        .ok_or_else(|| anyhow!("book.json not found in VFS"))?;
+    let book_enc_str = std::str::from_utf8(book_enc).context("book.json not UTF-8")?;
+
+    let book_json_bytes = v3::decrypt_string(book_enc_str.trim(), &book_key, iv)
+        .context("decrypt book.json")?;
+    let book_json_str = String::from_utf8(book_json_bytes).context("book.json not UTF-8")?;
+    let book_data: serde_json::Value =
+        serde_json::from_str(&book_json_str).context("book.json parse")?;
+
+    let book_name = book_data["bookName"]
+        .as_str()
+        .unwrap_or("unknown");
+    let total_page = book_data["totalPage"].as_u64().unwrap_or(0);
+    tracing::info!(book_name, total_page, "book metadata");
+
+    // Collect and decrypt webp files from the VFS
+    let (pages, layers, _thumbs) = collect_v3_webp(&extracted, &book_key, iv)?;
+    tracing::info!(pages = pages.len(), layers = layers.len(), "assets decrypted");
+
+    // Step 6: webp → PDF
+    tracing::info!("[6/6] Converting webp → PDF...");
+    let pdf_path = file.output.clone();
+    if let Some(parent) = pdf_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    webp_to_pdf(&pages, &layers, &pdf_path)?;
+    tracing::info!(output = %pdf_path.display(), "PDF written");
+
+    Ok(())
+}
+
+/// Collect, decrypt, and categorise webp files from extracted VFS.
+fn collect_v3_webp(
+    extracted: &[crate::enigma::ExtractedFile],
+    book_key: &[u8],
+    iv: &[u8],
+) -> Result<(Vec<Vec<u8>>, HashMap<usize, Vec<u8>>, Vec<Vec<u8>>)> {
+    let mut pages: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut layers: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut thumbs: Vec<Vec<u8>> = Vec::new();
+
+    for f in extracted {
+        let path = &f.path;
+        let fn_lower = path.to_lowercase();
+
+        if !fn_lower.ends_with(".webp") {
+            continue;
+        }
+
+        // Extract filename from path
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let name_lower = name.to_lowercase();
+
+        // Thumbnails: t-*.webp — unencrypted (RIFF header)
+        if name_lower.starts_with("t-") && f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
+            thumbs.push(f.data.clone());
+            continue;
+        }
+
+        // Try AES decrypt
+        let dec = match v3::decrypt_bytes(&f.data, book_key, iv) {
+            Ok(d) => d,
+            Err(_) => {
+                // Maybe it's already plain (RIFF header)
+                if f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
+                    f.data.clone()
+                } else {
+                    tracing::warn!(path = %path, "decrypt failed, skipping");
+                    continue;
+                }
+            }
+        };
+
+        // p-l-N.webp = layer for page N
+        if name_lower.starts_with("p-l-") {
+            if let Some(num) = extract_page_number(name) {
+                layers.insert(num, dec);
+            }
+            continue;
+        }
+
+        // p-N.webp = page N
+        if name_lower.starts_with("p-") {
+            if let Some(num) = extract_page_number(name) {
+                pages.push((num, dec));
+            }
+            continue;
+        }
+
+        // Unknown webp, skip
+        tracing::debug!(path = %path, "unknown webp, skipped");
+    }
+
+    // Sort pages by number
+    pages.sort_by_key(|(n, _)| *n);
+
+    let pages: Vec<Vec<u8>> = pages.into_iter().map(|(_, d)| d).collect();
+    Ok((pages, layers, thumbs))
+}
+
+fn extract_page_number(name: &str) -> Option<usize> {
+    // p-1.webp or p-l-1.webp → extract "1"
+    let stem = name.trim_end_matches(".webp").trim_end_matches(".WEBP");
+    // Find the last '-' and parse what follows
+    let pos = stem.rfind('-')?;
+    stem[pos + 1..].parse::<usize>().ok()
+}
+
+/// Convert decrypted webp pages + optional layers to a PDF.
+fn webp_to_pdf(
+    pages: &[Vec<u8>],
+    layers: &HashMap<usize, Vec<u8>>,
+    pdf_path: &Path,
+) -> Result<()> {
+    use image::{DynamicImage, ImageFormat};
+
+    if pages.is_empty() {
+        // Create empty PDF
+        let mut doc = oxidize_pdf::Document::new();
+        return doc.save(pdf_path).context("save empty PDF");
+    }
+
+    let mut doc = oxidize_pdf::Document::new();
+    doc.set_title(&file_stem(pdf_path));
+
+    for (idx, page_data) in pages.iter().enumerate() {
+        let mut img = image::load_from_memory_with_format(page_data, ImageFormat::WebP)
+            .with_context(|| format!("decode webp page {idx}"))?
+            .to_rgb8();
+
+        // Merge layer if exists
+        if let Some(layer_data) = layers.get(&idx) {
+            let layer = image::load_from_memory_with_format(layer_data, ImageFormat::WebP)
+                .with_context(|| format!("decode webp layer {idx}"))?
+                .to_rgba8();
+
+            // Paste RGBA layer onto RGB page
+            for y in 0..layer.height().min(img.height()) {
+                for x in 0..layer.width().min(img.width()) {
+                    let lp = layer.get_pixel(x, y);
+                    if lp[3] > 0 {
+                        img.put_pixel(x, y, image::Rgb([lp[0], lp[1], lp[2]]));
+                    }
+                }
+            }
+        }
+
+        // Encode as JPEG for PDF
+        let mut jpg_buf = Vec::new();
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut jpg_buf), ImageFormat::Jpeg)
+            .with_context(|| format!("encode jpg page {idx}"))?;
+
+        let pdf_image = oxidize_pdf::Image::from_jpeg_data(jpg_buf)
+            .with_context(|| format!("pdf image page {idx}"))?;
+
+        let mut page = oxidize_pdf::Page::new(
+            pdf_image.width() as f64,
+            pdf_image.height() as f64,
+        );
+        page.add_image("img", pdf_image);
+        page.draw_image("img", 0.0, 0.0,
+            page.width(), page.height(),
+        )?;
+        doc.add_page(page);
+    }
+
+    doc.save(pdf_path).context("save PDF")?;
+    Ok(())
+}
+
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output")
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
