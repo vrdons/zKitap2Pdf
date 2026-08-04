@@ -2,10 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.5]
+
+### Bug Fixes
+
+- Decrypt on newer zKitap
+- Duplicate pdf files
+- ExecutionLimit configuration
+
+### Features
+
+- Async Rendering Jobs
+- 2025-2026 zKitap decryption
+
+### Miscellaneous Tasks
+
+- Bump version to 0.1.4
+- Bump oxidize-pdf from 1.6.6 to 1.6.7
+
+### Performance
+
+- Increase the thread memory to 224 mb
+
+### Refactor
+
+- Watch temp folder instead of Temp folder
+- Remove unused implementations & integrate tracing
+- Optimize Workflow
+
+### Styling
+
+- Format README
+
 ## [0.1.4] - 2025-12-14
 
 ### Miscellaneous Tasks
 
+- Update version to v0.1.3-hotfix
 - Do not use --input argument
 
 ## [0.1.3-hotfix] - 2025-12-14

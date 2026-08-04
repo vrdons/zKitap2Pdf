@@ -1,6 +1,6 @@
 [package]
 name = "zKitap2Pdf"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "zKitap2pdf is a tool for converting Fernus Z-kitap e-books from exe to pdf format using ruffle"
 authors = ["Vrdons <vrdons@proton.me>", "ErenayDev <erenaydev@proton.me>"]
