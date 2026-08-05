@@ -7,7 +7,7 @@ use std::time::Duration;
 
 /// Polled once at startup to surface to the user that the Wine prefix is being
 /// initialised (this can stall for several seconds on a fresh prefix).
-pub const WINE_MISSING: &str = "Wine not installed or not found in PATH";
+// pub const WINE_MISSING: &str = "Wine not installed or not found in PATH";
 
 /// DLL watcher (notify-based) timing knobs.
 ///
