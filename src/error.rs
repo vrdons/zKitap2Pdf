@@ -2,7 +2,7 @@
 //!
 //! Pipeline/CLI code works with `anyhow::Error` for ergonomic `.context()`
 //! chaining. Typed errors (`?` + `#[from]`) flow through the umbrella
-//! [`Error`] enum automatically.
+//! [`enum@Error`] enum automatically.
 
 use thiserror::Error;
 
