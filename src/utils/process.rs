@@ -4,7 +4,7 @@
 //! DLLs dropped into the Wine prefix's `%TEMP%`.
 //! Windows path: launch the projector directly, collect from `%TEMP%`.
 
-use std::env;
+// use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -15,7 +15,7 @@ use std::fs;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 compile_error!("zKitap2Pdf only supports Linux (via Wine) and Windows; see issue #7");
 
-use crate::config::WINE_MISSING;
+// use crate::config::WINE_MISSING;
 
 /// Resolve the Wine prefix used by the current environment.
 #[cfg(target_os = "linux")]
