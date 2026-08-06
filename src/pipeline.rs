@@ -121,7 +121,7 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, upscale: &UpscaleOpts) -> R
 fn handle_v3(file: &Files, upscale: &UpscaleOpts) -> Result<()> {
     // Step 1: Unpack Enigma VFS
     tracing::info!("[1/6] Unpacking Enigma VFS...");
-    let extracted = crate::enigma::unpack(&file.input).context("Enigma unpack failed")?;
+    let extracted = evbunpack_rs::enigma::unpack(&file.input).context("Enigma unpack failed")?;
     tracing::info!(file_count = extracted.len(), "VFS extracted");
 
     // Build lookup by path
@@ -232,7 +232,7 @@ struct V3Assets {
 
 /// Collect, decrypt, and categorise webp files from extracted VFS.
 fn collect_v3_webp(
-    extracted: &[crate::enigma::ExtractedFile],
+    extracted: &[evbunpack_rs::enigma::ExtractedFile],
     book_key: &[u8],
     iv: &[u8],
 ) -> Result<V3Assets> {

@@ -152,42 +152,6 @@ pub enum SwfError {
 }
 
 // ---------------------------------------------------------------------------
-// Enigma — PE / EVB parsing
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Error)]
-pub enum EnigmaError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Not a valid PE file")]
-    InvalidPe,
-    #[error("PE section {0} not found")]
-    NoEnigmaSection(String),
-    #[error("Invalid EVB magic: expected 'EVB\\0'")]
-    InvalidMagic,
-    #[error("Unexpected end of data")]
-    UnexpectedEof,
-    #[error("VFS parse error: {0}")]
-    VfsParse(String),
-}
-
-// ---------------------------------------------------------------------------
-// aPLib — decompression
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Error)]
-pub enum AplibError {
-    #[error("unexpected end of aPLib stream")]
-    UnexpectedEof,
-    #[error("invalid offset in aPLib stream")]
-    InvalidOffset,
-    #[error("invalid AP32 header")]
-    InvalidHeader,
-    #[error("packed data CRC mismatch")]
-    PackedCrcMismatch,
-}
-
-// ---------------------------------------------------------------------------
 // Umbrella
 // ---------------------------------------------------------------------------
 
@@ -207,10 +171,10 @@ pub enum Error {
     Swf(#[from] SwfError),
 
     #[error(transparent)]
-    Enigma(#[from] EnigmaError),
+    Enigma(#[from] evbunpack_rs::error::EnigmaError),
 
     #[error(transparent)]
-    Aplib(#[from] AplibError),
+    Aplib(#[from] evbunpack_rs::error::AplibError),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

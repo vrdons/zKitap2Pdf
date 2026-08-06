@@ -6,7 +6,6 @@
 
 mod cli;
 mod config;
-mod enigma;
 pub mod error;
 mod fernus;
 mod image_proc;
