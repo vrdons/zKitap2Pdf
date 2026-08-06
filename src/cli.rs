@@ -24,7 +24,7 @@ pub struct Args {
     pub output: Option<PathBuf>,
 
     /// Scale factor applied to the rendered image (1.0–3.0, e.g. 2.8 = 280%).
-    #[arg(short = 's', long, default_value_t = 2.8)]
+    #[arg(short = 's', long, default_value_t = 1.8)]
     pub scale: f64,
 
     /// Graphics backend used by Ruffle.
