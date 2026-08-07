@@ -5,7 +5,7 @@
 //! per-file `HandleArgs` anymore — the pipeline takes `(exporter, &Files,
 //! scale)` directly, since `debug` becomes global once tracing is initialised.
 
-use std::{ffi::OsStr, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 use clap::Parser;
@@ -19,7 +19,7 @@ pub struct Args {
     #[arg(value_name = "INPUT")]
     pub input: PathBuf,
 
-    /// Output file (single EXE) or directory (batch).
+    /// Output directory
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
@@ -51,6 +51,11 @@ pub struct Args {
     /// Enable verbose output (debug-level logs).
     #[arg(long)]
     pub debug: bool,
+
+    /// Export rendered pages as JPEG files into the output directory instead
+    /// of writing a PDF. Each page is written as `{stem}_NNNN.jpg`.
+    #[arg(long)]
+    pub export: bool,
 }
 
 /// Normalized input/output information for a single EXE.
@@ -58,6 +63,7 @@ pub struct Args {
 pub struct Files {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub out_dir: PathBuf,
     pub filename: String,
 }
 
@@ -73,6 +79,9 @@ pub struct ValidatedArgs {
     pub graphics: GraphicsBackend,
     pub cores: usize,
     pub max_mem: usize,
+    /// When set, pages are written as JPEG files into the output directory
+    /// instead of being embedded into a PDF.
+    pub export: bool,
 }
 
 impl Args {
@@ -83,6 +92,22 @@ impl Args {
     pub fn validate(&self) -> Result<ValidatedArgs> {
         if !self.input.exists() {
             bail!("Input does not exist: {:?}", self.input);
+        }
+
+        // `--export` writes JPEG pages into `--output`, which then becomes
+        // mandatory. Without `--export`, `--output` stays optional and
+        // defaults to the CWD (single file) or `out/` (directory input).
+        if self.export && self.output.is_none() {
+            bail!("--output is required when --export is given");
+        }
+        if let Some(dir) = &self.output {
+            if dir.is_file() {
+                bail!("Output path must be a directory, not a file: {:?}", dir);
+            }
+            if !dir.exists() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| anyhow!("creating output dir {}: {e}", dir.display()))?;
+            }
         }
 
         // Resolve the render scale: an explicit `--scale` wins and disables
@@ -119,7 +144,9 @@ impl Args {
         if let Some(dpi) = target_dpi
             && !(72..=300).contains(&dpi)
         {
-            bail!("--target-dpi must be between 72 and 216, you dont wanna make 4k pdf image. got {dpi}");
+            bail!(
+                "--target-dpi must be between 72 and 216, you dont wanna make 4k pdf image. got {dpi}"
+            );
         }
 
         let files = if self.input.is_dir() {
@@ -135,31 +162,30 @@ impl Args {
             graphics: self.graphics,
             cores: self.cores,
             max_mem: self.max_mem,
+            export: self.export,
         })
     }
 
     fn collect_dir(&self) -> Result<Vec<Files>> {
         let found = crate::utils::discovery::find_files(&self.input, "exe")?;
-        let output = self.output.clone().unwrap_or_else(|| PathBuf::from("out"));
-        if output.is_file() {
-            bail!("Output path must be a directory, not a file: {:?}", output);
-        }
-        if !output.exists() {
-            std::fs::create_dir_all(&output)
-                .map_err(|e| anyhow!("creating output dir {}: {e}", output.display()))?;
-        }
         if found.is_empty() {
             bail!("No .exe files found in input directory");
         }
 
+        let out_dir = self.output.clone().unwrap_or_else(|| PathBuf::from("out"));
+        if !out_dir.exists() {
+            std::fs::create_dir_all(&out_dir)
+                .map_err(|e| anyhow!("creating output dir {}: {e}", out_dir.display()))?;
+        }
         let mut list = Vec::with_capacity(found.len());
         for f in found {
             let input = std::fs::canonicalize(&f)?;
             let filename = file_stem_string(&input)?;
-            let output = output.join(format!("{filename}.pdf"));
+            let output = out_dir.join(format!("{filename}.pdf"));
             list.push(Files {
                 input,
                 output,
+                out_dir: out_dir.clone(),
                 filename,
             });
         }
@@ -175,16 +201,14 @@ impl Args {
         }
         let input = std::fs::canonicalize(&self.input)?;
         let filename = file_stem_string(&input)?;
-        let output = self
-            .output
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("{filename}.pdf")));
-        if output.extension().and_then(OsStr::to_str) != Some("pdf") {
-            bail!("Output file must be a PDF: {:?}", output);
-        }
+        let (out_dir, output) = match &self.output {
+            Some(dir) => (dir.clone(), dir.join(format!("{filename}.pdf"))),
+            None => (PathBuf::from("."), PathBuf::from(format!("{filename}.pdf"))),
+        };
         Ok(Files {
             input,
             output,
+            out_dir,
             filename,
         })
     }

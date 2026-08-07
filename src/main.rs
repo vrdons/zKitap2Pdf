@@ -53,8 +53,6 @@ fn main() -> Result<()> {
         max_mem: args.max_mem,
     })?;
 
-    setup_environment()?;
-
     let upscale = crate::image_proc::UpscaleOpts::new(args.scale);
     let mut errors = Vec::new();
 
@@ -67,6 +65,10 @@ fn main() -> Result<()> {
         .iter()
         .partition(|f| crate::utils::has_enigma(&f.input));
 
+    if !legacy_files.is_empty() {
+        setup_environment()?;
+    }
+
     let v3_errors: Vec<_> = v3_files
         .par_iter()
         .filter_map(|file| {
@@ -78,6 +80,7 @@ fn main() -> Result<()> {
                 args.cores,
                 args.max_mem,
                 args.target_dpi,
+                args.export,
             ) {
                 tracing::error!(error = %e, input = %file.input.display(), "conversion failed");
                 Some((file.input.clone(), e))
@@ -97,6 +100,7 @@ fn main() -> Result<()> {
             args.cores,
             args.max_mem,
             args.target_dpi,
+            args.export,
         ) {
             tracing::error!(error = %e, input = %file.input.display(), "conversion failed");
             errors.push((file.input.clone(), e));

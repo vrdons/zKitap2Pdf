@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::cli::Files;
-use crate::pdf::PdfOutput;
+use crate::pdf::{ExportWriter, PageSink, PdfOutput};
 use crate::ruffle::exporter::{Exporter, RenderedPage};
 
 /// Metadata for a single patched SWF ready to render.
@@ -40,7 +40,12 @@ pub struct SwfInput {
 /// Note: the upscale stage is deliberately *not* applied here — Ruffle already
 /// renders at the configured scale (`--scale`), so a second upscale in the PDF
 /// writer would double the size (3.24× instead of 1.8×) for zero quality gain.
-pub fn render(exporter: &Exporter, swf_inputs: &[SwfInput], file_info: &Files) -> Result<()> {
+pub fn render(
+    exporter: &Exporter,
+    swf_inputs: &[SwfInput],
+    file_info: &Files,
+    export: bool,
+) -> Result<()> {
     let worker = exporter.spawn_worker();
 
     let job_scales: Vec<f64> = match exporter.target_dpi() {
@@ -106,7 +111,14 @@ pub fn render(exporter: &Exporter, swf_inputs: &[SwfInput], file_info: &Files) -
         path: file_info.output.clone(),
         title: file_info.filename.clone(),
     };
-    let mut writer = crate::pdf::PdfWriter::new(&out);
+
+    // In export mode no PDF is produced — pages are written as JPEG files
+    // into the output directory.
+    let mut writer: Box<dyn PageSink> = if export {
+        Box::new(ExportWriter::new(&file_info.out_dir, &file_info.filename))
+    } else {
+        Box::new(crate::pdf::PdfWriter::new(&out))
+    };
     let mut total_pages = 0u32;
     for res in pages {
         match res {

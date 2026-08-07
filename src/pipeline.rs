@@ -31,7 +31,7 @@ use crate::fernus::crypto::{DEFAULT_KRY_CODE, DEFAULT_PUBLISHER_KEY, KK, KryCode
 use crate::fernus::frns::{self, DecryptedFrame};
 use crate::fernus::v3;
 use crate::image_proc::UpscaleOpts;
-use crate::pdf::{PdfOutput, PdfWriter, page_with_overlay};
+use crate::pdf::{ExportWriter, PageSink, PdfOutput, PdfWriter, page_with_overlay};
 use crate::ruffle::exporter::Exporter;
 use crate::ruffle::render::{SwfInput, render as render_pdf};
 use crate::ruffle::swf;
@@ -51,10 +51,11 @@ pub fn handle_exe(
     cores: usize,
     max_mem: usize,
     target_dpi: Option<u32>,
+    export: bool,
 ) -> Result<()> {
     if utils::has_enigma(&file.input) {
         tracing::info!("v3 format detected (Enigma + Flutter)");
-        return handle_v3(file, upscale, cores, max_mem, target_dpi);
+        return handle_v3(file, upscale, cores, max_mem, target_dpi, export);
     }
 
     let mut child = process::execute_exe(&file.input)?;
@@ -141,7 +142,7 @@ pub fn handle_exe(
     }
 
     swf_inputs.sort_by_key(|input| !input.name.contains("sysb"));
-    render_pdf(exporter, &swf_inputs, file)
+    render_pdf(exporter, &swf_inputs, file, export)
 }
 
 /// Process a v3 Flutter + Enigma EXE.
@@ -151,6 +152,7 @@ fn handle_v3(
     cores: usize,
     max_mem: usize,
     target_dpi: Option<u32>,
+    export: bool,
 ) -> Result<()> {
     // Step 1: Unpack Enigma VFS
     tracing::info!("[1/6] Unpacking Enigma VFS...");
@@ -165,10 +167,6 @@ fn handle_v3(
 
     // Debug: dump VFS file list
     tracing::debug!("VFS paths:");
-    for path in lookup.keys() {
-        let data = lookup[path];
-        tracing::debug!(path, len = data.len(), first_bytes = ?&data[..data.len().min(16)]);
-    }
 
     // Step 2: Extract keystr & IV from kernel_blob.bin
     tracing::info!("[2/6] Extracting keystr & IV from kernel_blob.bin...");
@@ -239,16 +237,16 @@ fn handle_v3(
     tracing::info!(book_name, total_page, "book metadata");
 
     // Collect and decrypt webp files from the VFS
-    let assets = collect_v3_webp(&extracted, &book_key, iv)?;
+    let assets = collect_v3_webp(&extracted, &book_key, iv, cores)?;
     tracing::info!(
         pages = assets.pages.len(),
         layers = assets.layers.len(),
         "assets decrypted"
     );
 
-    // Step 6: webp → PDF (with optional upscale + layer overlay)
+    // Step 6: webp → PDF
     tracing::info!("[6/6] Converting webp → PDF...");
-    write_v3_pdf(file, &assets, upscale, cores, max_mem, target_dpi)?;
+    write_v3_pdf(file, &assets, upscale, cores, max_mem, target_dpi, export)?;
     Ok(())
 }
 
@@ -268,74 +266,72 @@ fn collect_v3_webp(
     extracted: &[evbunpack_rs::enigma::ExtractedFile],
     book_key: &[u8],
     iv: &[u8],
+    cores: usize,
 ) -> Result<V3Assets> {
     let mut pages: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut layers: HashMap<usize, Vec<u8>> = HashMap::new();
 
-    // Decryption is stateless per file, so it parallelises trivially. Each
-    // matching file is reduced into a `(category, page_num, data)` tuple and
-    // folded into the output collections afterwards.
-    extracted
-        .par_iter()
-        .filter_map(|f| {
-            let path = &f.path;
-            let fn_lower = path.to_lowercase();
-            if !fn_lower.ends_with(".webp") {
-                return None;
-            }
+    let chunk_size = cores.max(1).saturating_mul(3); // cores x 3
 
-            // Extract filename from path.
-            let name = Path::new(path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            let name_lower = name.to_lowercase();
-
-            // Thumbnails (t-*.webp) are unencrypted and unused by the PDF, skip them.
-            if name_lower.starts_with("t-") {
-                return None;
-            }
-
-            // Try AES decrypt; fall back to plaintext if it already has a RIFF header.
-            let dec = match v3::decrypt_bytes(&f.data, book_key, iv) {
-                Ok(d) => d,
-                Err(_) => {
-                    if f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
-                        f.data.clone()
-                    } else {
-                        tracing::warn!(path = %path, "decrypt failed, skipping");
-                        return None;
-                    }
+    for chunk in extracted.chunks(chunk_size) {
+        let results: Vec<(u8, usize, Vec<u8>)> = chunk
+            .par_iter()
+            .filter_map(|f| {
+                let path = &f.path;
+                let fn_lower = path.to_lowercase();
+                if !fn_lower.ends_with(".webp") {
+                    return None;
                 }
-            };
 
-            // Validate that the decrypted payload actually looks like webp — a bad
-            // key/IV yields garbage that would panic the image decoder later.
-            if dec.len() < 12 || &dec[..4] != b"RIFF" || &dec[8..12] != b"WEBP" {
-                tracing::warn!(path = %path, "decrypted data is not a valid WebP, skipping");
-                return None;
-            }
+                let name = Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                let name_lower = name.to_lowercase();
 
-            // p-l-N.webp = overlay layer for page N; p-N.webp = page content.
-            if let Some(stripped) = name_lower.strip_prefix("p-l-") {
-                return parse_page_num_suffix(stripped).map(|num| (1, num, dec));
-            }
-            if let Some(stripped) = name_lower.strip_prefix("p-") {
-                return parse_page_num_suffix(stripped).map(|num| (0, num, dec));
-            }
+                if name_lower.starts_with("t-") {
+                    return None;
+                }
 
-            tracing::debug!(path = %path, "unknown webp, skipped");
-            None
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .for_each(|(is_layer, num, dec)| {
+                let dec = match v3::decrypt_bytes(&f.data, book_key, iv) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        if f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
+                            f.data.clone()
+                        } else {
+                            tracing::warn!(path = %path, "decrypt failed, skipping");
+                            return None;
+                        }
+                    }
+                };
+
+                // Validate that the decrypted payload actually looks like webp — a bad
+                // key/IV yields garbage that would panic the image decoder later.
+                if dec.len() < 12 || &dec[..4] != b"RIFF" || &dec[8..12] != b"WEBP" {
+                    tracing::warn!(path = %path, "decrypted data is not a valid WebP, skipping");
+                    return None;
+                }
+
+                if let Some(stripped) = name_lower.strip_prefix("p-l-") {
+                    return parse_page_num_suffix(stripped).map(|num| (1, num, dec));
+                }
+                if let Some(stripped) = name_lower.strip_prefix("p-") {
+                    return parse_page_num_suffix(stripped).map(|num| (0, num, dec));
+                }
+
+                tracing::debug!(path = %path, "unknown webp, skipped");
+                None
+            })
+            .collect();
+
+        for (is_layer, num, dec) in results {
             if is_layer == 1 {
                 layers.insert(num, dec);
             } else {
                 pages.push((num, dec));
             }
-        });
+        }
+    }
 
     // Sort pages by their real page number to guarantee natural reading order.
     pages.sort_by_key(|(n, _)| *n);
@@ -416,53 +412,26 @@ fn write_v3_pdf(
     cores: usize,
     max_mem: usize,
     target_dpi: Option<u32>,
+    export: bool,
 ) -> Result<()> {
     let out = PdfOutput {
         path: file.output.clone(),
         title: file.filename.clone(),
     };
-    let mut writer = PdfWriter::new(&out);
+    let mut writer: Box<dyn PageSink> = if export {
+        Box::new(ExportWriter::new(&file.out_dir, &file.filename))
+    } else {
+        Box::new(PdfWriter::new(&out))
+    };
 
     let chunk_size = v3_chunk_size(cores, max_mem);
     let layers = &assets.layers;
 
     let upscale = match target_dpi {
         Some(dpi) => {
-            let min_w = assets
-                .pages
-                .iter()
-                .map(|(_, d)| {
-                    decode_webp(d, "probe")
-                        .map(|i| i.width())
-                        .unwrap_or(u32::MAX)
-                })
-                .min()
-                .unwrap_or(u32::MAX);
-            let min_h = assets
-                .pages
-                .iter()
-                .map(|(_, d)| {
-                    decode_webp(d, "probe")
-                        .map(|i| i.height())
-                        .unwrap_or(u32::MAX)
-                })
-                .min()
-                .unwrap_or(u32::MAX);
-            if min_w == u32::MAX || min_h == u32::MAX {
-                tracing::warn!("could not probe page sizes, falling back to fixed scale");
-                upscale.clone()
-            } else {
-                let factor = dpi as f64 / 72.0;
-                let tw = ((min_w as f64) * factor).round() as u32;
-                let th = ((min_h as f64) * factor).round() as u32;
-                tracing::info!(
-                    dpi,
-                    min_page = format!("{min_w}x{min_h}"),
-                    target = format!("{tw}x{th}"),
-                    "target-DPI upscale (small pages only, no downscale)"
-                );
-                UpscaleOpts::to_target((tw, th))
-            }
+            let tw = (595.28 * dpi as f64 / 72.0).round() as u32; // A4 width in pt
+            let th = (841.89 * dpi as f64 / 72.0).round() as u32; // A4 height in pt
+            UpscaleOpts::to_target((tw, th))
         }
         None => upscale.clone(),
     };

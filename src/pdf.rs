@@ -15,7 +15,7 @@
 
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageFormat};
@@ -88,6 +88,72 @@ impl<'a> PdfWriter<'a> {
         save_atomic(&mut self.doc, &self.out.path)
             .with_context(|| format!("saving PDF to {}", self.out.path.display()))?;
         tracing::info!(pages = self.count, output = %self.out.path.display(), "PDF written");
+        Ok(())
+    }
+}
+
+pub trait PageSink {
+    fn add_jpeg_page(&mut self, jpeg: &[u8]) -> Result<()>;
+
+    fn add_jpeg_with_dims(&mut self, jpeg: &[u8], _width: u32, _height: u32) -> Result<()> {
+        self.add_jpeg_page(jpeg)
+    }
+
+    fn finish(self: Box<Self>) -> Result<()>;
+}
+
+impl PageSink for PdfWriter<'_> {
+    fn add_jpeg_page(&mut self, jpeg: &[u8]) -> Result<()> {
+        PdfWriter::add_jpeg_page(self, jpeg)
+    }
+
+    fn add_jpeg_with_dims(&mut self, jpeg: &[u8], width: u32, height: u32) -> Result<()> {
+        PdfWriter::add_jpeg_with_dims(self, jpeg, width, height)
+    }
+
+    fn finish(self: Box<Self>) -> Result<()> {
+        (*self).finish()
+    }
+}
+
+pub struct ExportWriter {
+    dir: PathBuf,
+    stem: String,
+    count: u32,
+}
+
+impl ExportWriter {
+    pub fn new(dir: &Path, stem: &str) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            stem: stem.to_string(),
+            count: 0,
+        }
+    }
+}
+
+impl PageSink for ExportWriter {
+    fn add_jpeg_page(&mut self, jpeg: &[u8]) -> Result<()> {
+        self.count += 1;
+        let name = format!("{}_{:04}.jpg", self.stem, self.count);
+        let path = self.dir.join(name);
+        fs::write(&path, jpeg).with_context(|| format!("writing {}", path.display()))?;
+        tracing::info!(page = self.count, path = %path.display(), "page exported");
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<()> {
+        if self.count == 0 {
+            bail!(
+                "no pages to export into {} (refusing empty export)",
+                self.dir.display()
+            );
+        }
+        tracing::info!(
+            pages = self.count,
+            dir = %self.dir.display(),
+            "JPEG export finished"
+        );
         Ok(())
     }
 }
