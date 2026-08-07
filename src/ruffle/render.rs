@@ -43,18 +43,52 @@ pub struct SwfInput {
 pub fn render(exporter: &Exporter, swf_inputs: &[SwfInput], file_info: &Files) -> Result<()> {
     let worker = exporter.spawn_worker();
 
+    let job_scales: Vec<f64> = match exporter.target_dpi() {
+        Some(dpi) => {
+            let factor = dpi as f64 / 72.0;
+            let min_w = swf_inputs
+                .iter()
+                .map(|s| s.width)
+                .fold(f64::INFINITY, f64::min);
+            let min_h = swf_inputs
+                .iter()
+                .map(|s| s.height)
+                .fold(f64::INFINITY, f64::min);
+            let (tw, th) = (min_w * factor, min_h * factor);
+            tracing::info!(
+                dpi,
+                min_page = format!("{}x{}", min_w as u32, min_h as u32),
+                target = format!("{}x{}", tw as u32, th as u32),
+                "target-DPI render (per-page scale, no downscale)"
+            );
+            swf_inputs
+                .iter()
+                .map(|s| {
+                    if s.width >= tw && s.height >= th {
+                        1.0 // already at/above target — render as-is
+                    } else {
+                        factor
+                    }
+                })
+                .collect()
+        }
+        None => swf_inputs.iter().map(|_| exporter.scale()).collect(),
+    };
+
     // Queue every SWF up-front; the worker processes them one at a time on its
     // own thread. Order is preserved, so sysb (content) precedes sysm (mask).
     let job_rx_list: Vec<_> = swf_inputs
         .iter()
-        .map(|input| {
+        .zip(&job_scales)
+        .map(|(input, &scale)| {
             tracing::info!(
                 swf = %input.name,
                 dims = format!("{}x{}", input.width as u32, input.height as u32),
+                scale,
                 "queued for render"
             );
             worker
-                .send_job(input.path.clone())
+                .send_job(input.path.clone(), scale)
                 .with_context(|| format!("queueing render job for {}", input.name))
         })
         .collect::<Result<Vec<_>>>()?;

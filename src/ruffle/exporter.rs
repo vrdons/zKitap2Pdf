@@ -19,7 +19,11 @@ use std::{
 
 pub struct ExporterOpt {
     pub graphics: GraphicsBackend,
+    /// Fixed render scale, bypasses target_dpi
     pub scale: f64,
+    /// Target print resolution (DPI). When set, each SWF's render scale is
+    /// computed from its own size at render time.
+    pub target_dpi: Option<u32>,
     /// Approximate memory budget (MiB) for in-flight rendered frames.
     /// `0` = unbounded (default channel sizes). Bounds the capture/JPEG
     /// queues so low-memory machines don't pile up big RGBA/JPEG buffers.
@@ -29,6 +33,7 @@ pub struct ExporterOpt {
 pub struct Exporter {
     descriptors: Arc<Descriptors>,
     scale: f64,
+    target_dpi: Option<u32>,
     max_mem: usize,
 }
 
@@ -51,6 +56,9 @@ pub struct RenderedPage {
 /// A single job for the persistent render worker.
 pub struct RenderJob {
     pub path: PathBuf,
+    /// Per-job render scale, already resolved by the caller (fixed `--scale`
+    /// or computed from the target-DPI rule).
+    pub scale: f64,
     /// Per-job channel — the worker sends JPEG-encoded pages (or errors) here.
     pub tx: mpsc::SyncSender<Result<RenderedPage>>,
 }
@@ -63,9 +71,14 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Queue a SWF for rendering. Returns the per-job receiver that yields
-    /// JPEG-encoded pages in order.  Blocks only if the worker's queue is full.
-    pub fn send_job(&self, path: PathBuf) -> Result<mpsc::Receiver<Result<RenderedPage>>> {
+    /// Queue a SWF for rendering at the given scale. Returns the per-job
+    /// receiver that yields JPEG-encoded pages in order.  Blocks only if the
+    /// worker's queue is full.
+    pub fn send_job(
+        &self,
+        path: PathBuf,
+        scale: f64,
+    ) -> Result<mpsc::Receiver<Result<RenderedPage>>> {
         // A bounded per-job channel provides mild back-pressure so a book with
         // hundreds of pages doesn't queue every encoded JPEG in RAM before the
         // PDF writer drains it. With `--max-mem` the queue shrinks further to
@@ -73,7 +86,7 @@ impl Worker {
         let queue_len = if self.max_mem > 0 { 2 } else { 4 };
         let (tx, rx) = mpsc::sync_channel(queue_len);
         self.job_tx
-            .send(RenderJob { path, tx })
+            .send(RenderJob { path, scale, tx })
             .map_err(|_| anyhow!("render worker has died"))?;
         Ok(rx)
     }
@@ -104,8 +117,19 @@ impl Exporter {
         Ok(Self {
             descriptors: Arc::new(Descriptors::new(instance, adapter, device, queue)),
             scale: opt.scale,
+            target_dpi: opt.target_dpi,
             max_mem: opt.max_mem,
         })
+    }
+
+    /// Fixed scale applied when target-DPI mode is off.
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// Target-DPI mode, if enabled.
+    pub fn target_dpi(&self) -> Option<u32> {
+        self.target_dpi
     }
 
     /// Spawn a **single** persistent render worker thread.  All SWF rendering
@@ -116,12 +140,11 @@ impl Exporter {
         // per-job page queues are where big buffers accumulate.
         let (job_tx, job_rx) = mpsc::sync_channel::<RenderJob>(8);
         let descriptors = self.descriptors.clone();
-        let scale = self.scale;
         let max_mem = self.max_mem;
 
         let handle = thread::spawn(move || {
             for job in job_rx {
-                render_frames(descriptors.clone(), scale, max_mem, &job.path, job.tx);
+                render_frames(descriptors.clone(), job.scale, max_mem, &job.path, job.tx);
             }
         });
 
@@ -215,11 +238,7 @@ fn render_frames(
                                 break; // consumer dropped
                             }
                             if (frame + 1) % 25 == 0 {
-                                tracing::info!(
-                                    page = frame + 1,
-                                    total = total_frames,
-                                    "captured"
-                                );
+                                tracing::info!(page = frame + 1, total = total_frames, "captured");
                             }
                         }
                         Err(e) => {

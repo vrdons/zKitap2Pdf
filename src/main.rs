@@ -49,6 +49,7 @@ fn main() -> Result<()> {
     let exporter = Exporter::new(&ExporterOpt {
         graphics: args.graphics,
         scale: args.scale,
+        target_dpi: args.target_dpi,
         max_mem: args.max_mem,
     })?;
 
@@ -61,15 +62,23 @@ fn main() -> Result<()> {
     // parallelise trivially. v1/v2 files launch a Wine projector that drops
     // payloads into a *shared* %TEMP% watcher — running those concurrently
     // would mix up payloads, so they stay serial.
-    let (v3_files, legacy_files): (Vec<_>, Vec<_>) =
-        args.files.iter().partition(|f| crate::utils::has_enigma(&f.input));
+    let (v3_files, legacy_files): (Vec<_>, Vec<_>) = args
+        .files
+        .iter()
+        .partition(|f| crate::utils::has_enigma(&f.input));
 
     let v3_errors: Vec<_> = v3_files
         .par_iter()
         .filter_map(|file| {
             tracing::info!(input = %file.input.display(), "processing (v3)");
-            if let Err(e) = pipeline::handle_exe(&exporter, file, &upscale, args.cores, args.max_mem)
-            {
+            if let Err(e) = pipeline::handle_exe(
+                &exporter,
+                file,
+                &upscale,
+                args.cores,
+                args.max_mem,
+                args.target_dpi,
+            ) {
                 tracing::error!(error = %e, input = %file.input.display(), "conversion failed");
                 Some((file.input.clone(), e))
             } else {
@@ -81,7 +90,14 @@ fn main() -> Result<()> {
 
     for file in &legacy_files {
         tracing::info!(input = %file.input.display(), "processing (v1/v2)");
-        if let Err(e) = pipeline::handle_exe(&exporter, file, &upscale, args.cores, args.max_mem) {
+        if let Err(e) = pipeline::handle_exe(
+            &exporter,
+            file,
+            &upscale,
+            args.cores,
+            args.max_mem,
+            args.target_dpi,
+        ) {
             tracing::error!(error = %e, input = %file.input.display(), "conversion failed");
             errors.push((file.input.clone(), e));
         }

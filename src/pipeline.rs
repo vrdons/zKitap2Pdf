@@ -42,17 +42,19 @@ use crate::utils::{self, process, watcher};
 /// `cores` is the user-configured parallelism cap (`--cores`): it bounds the
 /// v3 page chunk size so memory stays reasonable on big machines while the
 /// rayon pool does the actual work. `max_mem` (MiB) further caps the chunk by
-/// a memory budget (`--max-mem`, `0` = unbounded).
+/// a memory budget (`--max-mem`, `0` = unbounded). `target_dpi` (raw
+/// `--target-dpi`, `None` when `--scale` was given)
 pub fn handle_exe(
     exporter: &Exporter,
     file: &Files,
     upscale: &UpscaleOpts,
     cores: usize,
     max_mem: usize,
+    target_dpi: Option<u32>,
 ) -> Result<()> {
     if utils::has_enigma(&file.input) {
         tracing::info!("v3 format detected (Enigma + Flutter)");
-        return handle_v3(file, upscale, cores, max_mem);
+        return handle_v3(file, upscale, cores, max_mem, target_dpi);
     }
 
     let mut child = process::execute_exe(&file.input)?;
@@ -143,7 +145,13 @@ pub fn handle_exe(
 }
 
 /// Process a v3 Flutter + Enigma EXE.
-fn handle_v3(file: &Files, upscale: &UpscaleOpts, cores: usize, max_mem: usize) -> Result<()> {
+fn handle_v3(
+    file: &Files,
+    upscale: &UpscaleOpts,
+    cores: usize,
+    max_mem: usize,
+    target_dpi: Option<u32>,
+) -> Result<()> {
     // Step 1: Unpack Enigma VFS
     tracing::info!("[1/6] Unpacking Enigma VFS...");
     let extracted = evbunpack_rs::enigma::unpack(&file.input).context("Enigma unpack failed")?;
@@ -240,7 +248,7 @@ fn handle_v3(file: &Files, upscale: &UpscaleOpts, cores: usize, max_mem: usize) 
 
     // Step 6: webp → PDF (with optional upscale + layer overlay)
     tracing::info!("[6/6] Converting webp → PDF...");
-    write_v3_pdf(file, &assets, upscale, cores, max_mem)?;
+    write_v3_pdf(file, &assets, upscale, cores, max_mem, target_dpi)?;
     Ok(())
 }
 
@@ -407,6 +415,7 @@ fn write_v3_pdf(
     upscale: &UpscaleOpts,
     cores: usize,
     max_mem: usize,
+    target_dpi: Option<u32>,
 ) -> Result<()> {
     let out = PdfOutput {
         path: file.output.clone(),
@@ -416,6 +425,48 @@ fn write_v3_pdf(
 
     let chunk_size = v3_chunk_size(cores, max_mem);
     let layers = &assets.layers;
+
+    let upscale = match target_dpi {
+        Some(dpi) => {
+            let min_w = assets
+                .pages
+                .iter()
+                .map(|(_, d)| {
+                    decode_webp(d, "probe")
+                        .map(|i| i.width())
+                        .unwrap_or(u32::MAX)
+                })
+                .min()
+                .unwrap_or(u32::MAX);
+            let min_h = assets
+                .pages
+                .iter()
+                .map(|(_, d)| {
+                    decode_webp(d, "probe")
+                        .map(|i| i.height())
+                        .unwrap_or(u32::MAX)
+                })
+                .min()
+                .unwrap_or(u32::MAX);
+            if min_w == u32::MAX || min_h == u32::MAX {
+                tracing::warn!("could not probe page sizes, falling back to fixed scale");
+                upscale.clone()
+            } else {
+                let factor = dpi as f64 / 72.0;
+                let tw = ((min_w as f64) * factor).round() as u32;
+                let th = ((min_h as f64) * factor).round() as u32;
+                tracing::info!(
+                    dpi,
+                    min_page = format!("{min_w}x{min_h}"),
+                    target = format!("{tw}x{th}"),
+                    "target-DPI upscale (small pages only, no downscale)"
+                );
+                UpscaleOpts::to_target((tw, th))
+            }
+        }
+        None => upscale.clone(),
+    };
+
     // `par_chunks` yields parallel chunks; collect them (cheap slice refs) so
     // we can process each chunk's pages in parallel and embed serially.
     let chunks: Vec<_> = assets.pages.par_chunks(chunk_size).collect();
@@ -440,7 +491,7 @@ fn write_v3_pdf(
                         None => None,
                     };
                     let img = page_with_overlay(base, overlay.as_ref());
-                    let img = crate::image_proc::upscale_image(img, upscale);
+                    let img = crate::image_proc::upscale_image(img, &upscale);
                     let (w, h) = (img.width(), img.height());
                     let jpeg = crate::pdf::image_to_jpeg(&img)?;
                     tracing::info!(page = num, dims = format!("{w}x{h}"), "converted");

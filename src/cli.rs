@@ -24,8 +24,15 @@ pub struct Args {
     pub output: Option<PathBuf>,
 
     /// Scale factor applied to the rendered image (1.0–3.0, e.g. 2.8 = 280%).
-    #[arg(short = 's', long, default_value_t = 1.8)]
-    pub scale: f64,
+    /// When omitted it is resolved automatically: `--target-dpi` if given,
+    /// otherwise the default 1.8.
+    #[arg(short = 's', long)]
+    pub scale: Option<f64>,
+
+    /// Target print resolution (DPI) for rendered pages, e.g. 150 or 200.
+    /// Converts to a scale factor as `dpi / 72` (Flash's design resolution).
+    #[arg(long)]
+    pub target_dpi: Option<u32>,
 
     /// Graphics backend used by Ruffle.
     #[arg(long, short, default_value = "default")]
@@ -58,7 +65,11 @@ pub struct Files {
 #[derive(Debug, Clone)]
 pub struct ValidatedArgs {
     pub files: Vec<Files>,
+    /// Final resolved scale (from `--scale`, `--target-dpi`, or the default).
     pub scale: f64,
+    /// Raw `--target-dpi` value, kept for diagnostics. `None` = not given
+    /// (or overridden by `--scale`).
+    pub target_dpi: Option<u32>,
     pub graphics: GraphicsBackend,
     pub cores: usize,
     pub max_mem: usize,
@@ -73,8 +84,42 @@ impl Args {
         if !self.input.exists() {
             bail!("Input does not exist: {:?}", self.input);
         }
-        if !(1.0..=3.0).contains(&self.scale) {
-            bail!("scale must be between 1.0 and 3.0, got {}", self.scale);
+
+        // Resolve the render scale: an explicit `--scale` wins and disables
+        // `--target-dpi`; otherwise the default is 1.8. In `--target-dpi`
+        // mode the scale is **not** fixed here — it is resolved per page at
+        // render time (small pages are enlarged to the target, big pages are
+        // left untouched), so `scale` is set to 1.0 as a neutral placeholder.
+        let scale = match self.scale {
+            Some(s) => {
+                if self.target_dpi.is_some() {
+                    eprintln!("warning: --scale given, ignoring --target-dpi");
+                }
+                s
+            }
+            None => {
+                if self.target_dpi.is_some() {
+                    1.0 // no fixed scale; resolved per page at render time
+                } else {
+                    1.8
+                }
+            }
+        };
+        // Carry the raw `--target-dpi` only when it is actually in effect
+        // (i.e. no explicit `--scale`), so downstream stages never see a
+        // disabled DPI value.
+        let target_dpi = if self.scale.is_some() {
+            None
+        } else {
+            self.target_dpi
+        };
+        if !(1.0..=3.0).contains(&scale) {
+            bail!("scale must be between 1.0 and 3.0, got {scale}");
+        }
+        if let Some(dpi) = target_dpi
+            && !(72..=300).contains(&dpi)
+        {
+            bail!("--target-dpi must be between 72 and 216, you dont wanna make 4k pdf image. got {dpi}");
         }
 
         let files = if self.input.is_dir() {
@@ -85,7 +130,8 @@ impl Args {
 
         Ok(ValidatedArgs {
             files,
-            scale: self.scale,
+            scale,
+            target_dpi,
             graphics: self.graphics,
             cores: self.cores,
             max_mem: self.max_mem,

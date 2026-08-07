@@ -13,15 +13,38 @@ pub struct UpscaleOpts {
     /// Scale factor. `1.0` = leave the image untouched (and skip the work
     /// entirely). Typical values: 1.0–3.0.
     pub scale: f64,
+    pub target_px: Option<(u32, u32)>,
 }
 
 impl UpscaleOpts {
+    /// Fixed-factor mode (`--scale`): every page is multiplied by `scale`.
     pub fn new(scale: f64) -> Self {
-        Self { scale }
+        Self {
+            scale,
+            target_px: None,
+        }
     }
 
-    /// Whether the upscale stage does any actual work. Callers can use this to
-    /// short-circuit decode/encode when no resize is needed.
+    /// Target-size mode (`--target-dpi`): pages smaller than `target` are
+    /// upscaled to it (aspect-preserving), larger pages are left as-is.
+    pub fn to_target(target: (u32, u32)) -> Self {
+        Self {
+            scale: 1.0,
+            target_px: Some(target),
+        }
+    }
+
+    /// Whether the upscale stage does any actual work for an image of the
+    /// given dimensions. Callers can use this to short-circuit decode/encode
+    /// when no resize is needed.
+    pub fn is_noop_for(&self, w: u32, h: u32) -> bool {
+        match self.target_px {
+            Some((tw, th)) => w >= tw && h >= th,
+            None => self.scale <= 1.0 || !self.scale.is_finite(),
+        }
+    }
+
+    /// Backwards-compatible no-op check for callers without dimensions.
     pub fn is_noop(&self) -> bool {
         self.scale <= 1.0 || !self.scale.is_finite()
     }
@@ -33,14 +56,13 @@ impl Default for UpscaleOpts {
     }
 }
 
-/// Upscale an image by the configured factor.
+/// Upscale an image by the configured factor or to the configured target size.
 ///
-/// * If `opts.scale <= 1.0` or non-finite, the image is returned **unchanged** —
-///   no decode/encode cycle, no extra allocation.
-/// * Aspect ratio is always preserved (both dimensions multiplied by `scale`).
-/// * Alpha channel is handled: the image is converted to 8-bit RGBA, resized,
-///   then returned. Callers that feed the result to JPEG will drop alpha via
-///   [`crate::pdf::image_to_jpeg`].
+/// * Fixed factor mode: `scale <= 1.0` or non-finite → unchanged.
+/// * Target mode: the image is only **enlarged** to reach `target_px`;
+///   images already at/above the target are returned unchanged (no
+///   downscaling, ever). Aspect ratio is preserved by scaling to the
+///   *longest* edge that fits, so small pages reach the target on both axes.
 /// * [`image::imageops::FilterType::CatmullRom`] is used: near-Lanczos quality
 ///   at roughly half the cost, a good speed/quality trade-off for
 ///   photographic/page content.
@@ -48,11 +70,39 @@ impl Default for UpscaleOpts {
 ///   scale factors. A page that fails to resize returns the *original* image
 ///   rather than killing the whole conversion.
 pub fn upscale_image(img: DynamicImage, opts: &UpscaleOpts) -> DynamicImage {
+    let (w, h) = img.dimensions();
+
+    // Target mode: only upscale when the page is smaller than the target.
+    if let Some((tw, th)) = opts.target_px {
+        if opts.is_noop_for(w, h) {
+            return img; // already big enough — no downscale, no work
+        }
+        let scale = (tw as f64 / w as f64).max(th as f64 / h as f64);
+        let scale = if scale.is_finite() && scale > 1.0 {
+            scale
+        } else {
+            1.0
+        };
+        if scale <= 1.0 {
+            return img;
+        }
+        let new_w = ((w as f64) * scale).round().min(16384.0) as u32;
+        let new_h = ((h as f64) * scale).round().min(16384.0) as u32;
+        if new_w == w && new_h == h {
+            return img;
+        }
+        tracing::trace!(
+            from = format!("{w}x{h}"),
+            to = format!("{new_w}x{new_h}"),
+            "upscale (target)"
+        );
+        return img.resize(new_w, new_h, image::imageops::FilterType::CatmullRom);
+    }
+
     if opts.is_noop() {
         return img;
     }
 
-    let (w, h) = img.dimensions();
     let new_w = ((w as f64) * opts.scale).round();
     let new_h = ((h as f64) * opts.scale).round();
     if !new_w.is_finite() || !new_h.is_finite() || new_w < 1.0 || new_h < 1.0 {
@@ -219,6 +269,32 @@ mod tests {
         for s in [0.0, -1.0, f64::NAN] {
             assert!(UpscaleOpts::new(s).is_noop(), "scale {s} should be noop");
         }
+    }
+
+    #[test]
+    fn target_mode_upscales_only_small_pages() {
+        // Small page (566x807) → target 2x → enlarged.
+        let opts = UpscaleOpts::to_target((1132, 1614));
+        let img = DynamicImage::ImageRgb8(rgb(566, 807, 64));
+        let out = upscale_image(img, &opts);
+        assert_eq!(out.dimensions(), (1132, 1614));
+    }
+
+    #[test]
+    fn target_mode_never_downscales_large_pages() {
+        // Big page (2640x3402) already above target → untouched.
+        let opts = UpscaleOpts::to_target((1132, 1614));
+        let img = DynamicImage::ImageRgb8(rgb(2640, 3402, 64));
+        let out = upscale_image(img, &opts);
+        assert_eq!(out.dimensions(), (2640, 3402));
+    }
+
+    #[test]
+    fn target_mode_noop_for_already_big_enough() {
+        let opts = UpscaleOpts::to_target((100, 200));
+        assert!(opts.is_noop_for(150, 250));
+        assert!(!opts.is_noop_for(50, 250));
+        assert!(!opts.is_noop_for(150, 50));
     }
 
     #[test]
