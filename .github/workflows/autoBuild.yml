@@ -28,7 +28,7 @@ jobs:
           # - target: aarch64-apple-darwin
           #   os: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -42,7 +42,7 @@ jobs:
           cache-on-failure: true
 
       - name: Cache cargo tools
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         with:
           path: ~/.cargo/bin
@@ -103,7 +103,7 @@ jobs:
           find target/${{ matrix.target }}/generate-rpm -name "*.rpm" -exec cp {} ${{ steps.crate_info.outputs.name }}-${{ steps.crate_info.outputs.version }}-1.x86_64.rpm \;
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.crate_info.outputs.name }}-${{ matrix.target }}
           path: |
@@ -118,9 +118,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Get crate info
@@ -129,7 +129,7 @@ jobs:
           echo "name=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].name')" >> $GITHUB_OUTPUT
           echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
       - name: Create release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/**/*
           name: "v${{ steps.crate_info.outputs.version }}"
