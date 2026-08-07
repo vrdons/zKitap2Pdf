@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use image::RgbaImage;
 use ruffle_core::{PlayerBuilder, limits::ExecutionLimit, tag_utils::movie_from_path};
+use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::{
     backend::{WgpuRenderBackend, request_adapter_and_device},
     clap::GraphicsBackend,
@@ -202,13 +203,19 @@ fn render_frames(
         }
     };
 
+    // High (4x MSAA)
+    const FORCE_QUALITY: StageQuality = StageQuality::High;
+
     let player = PlayerBuilder::new()
         .with_renderer(renderer)
         .with_movie(movie)
         .with_viewport_dimensions(width, height, scale)
+        .with_quality(FORCE_QUALITY)
         .build();
 
-    tracing::info!(total_frames, %width, %height, "capturing frames");
+    tracing::info!(
+        total_frames, %width, %height, quality = %FORCE_QUALITY, "capturing frames"
+    );
 
     // Pipeline: the render loop pushes raw RGBA captures into a bounded queue,
     // a dedicated encoder thread converts them to JPEG and forwards them in
@@ -267,6 +274,11 @@ fn render_frames(
             };
             locked_player.preload(&mut ExecutionLimit::none());
             locked_player.run_frame();
+            // SWF AS'i run_frame sırasında stage.quality'yi düşürmüş olabilir;
+            // renderdan hemen önce tekrar High'a dayayarak MSAA (4x) yeniden
+            // kurulmasını garanti et. font/glyph kenarları bu sayede keskin
+            // kalır.
+            locked_player.set_quality(FORCE_QUALITY);
             locked_player.render();
 
             catch_unwind(AssertUnwindSafe(|| {
