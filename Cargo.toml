@@ -21,7 +21,7 @@ exclude = [
 
 [dependencies]
 anyhow = "1.0.101"
-clap = { version = "4.5.58", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 notify = "8.2.0"
 walkdir = "2.5.0"
@@ -31,7 +31,7 @@ swf = { git = "https://github.com/ruffle-rs/ruffle.git", package = "swf", rev = 
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_core", features = ["deterministic", "default_font"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
 ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render_wgpu", features = ["clap"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
 futures = "0.3.32"
-oxidize-pdf = "2.12.0"
+oxidize-pdf = "4.0.0"
 tempfile = "3.25.0"
 base64 = "0.23.0"
 hex = "0.4.3"
@@ -42,7 +42,7 @@ lzma-rs = { version = "0.3.0", features = ["raw_decoder"] }
 evbunpack-rs = { git = "https://github.com/vrdons/evbunpack-rs.git" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-aes = "0.8"
+aes = "0.9"
 regex = "1"
 thiserror = "2"
 rayon = "1.10.0"
