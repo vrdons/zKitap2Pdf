@@ -161,15 +161,16 @@ fn aes_cbc_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, V3Erro
         return Err(V3Error::AesBlockLen(data.len()));
     }
 
-    use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+    use aes::cipher::{Block, BlockCipherDecrypt, KeyInit};
 
-    let aes = Aes256::new(GenericArray::from_slice(key));
+    let aes = Aes256::new_from_slice(key).map_err(|_| V3Error::AesKeyLen(key.len()))?;
     let mut prev = iv.to_vec(); // 16 bytes
 
     let mut buf = data.to_vec();
     for chunk in buf.chunks_exact_mut(16) {
         // Decrypt block
-        let mut block = GenericArray::clone_from_slice(chunk);
+        let mut block = Block::<Aes256>::default();
+        block.copy_from_slice(chunk);
         aes.decrypt_block(&mut block);
 
         // XOR with previous ciphertext (or IV for first block)
