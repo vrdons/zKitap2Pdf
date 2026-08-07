@@ -21,7 +21,7 @@ use anyhow::{Context, Result, bail};
 use image::{DynamicImage, ImageFormat};
 use oxidize_pdf::{Document, Image, Page};
 
-use crate::image_proc::{merge_overlay, upscale_image};
+use crate::image_proc::{merge_overlay, to_rgb};
 
 /// Metadata applied to every generated PDF.
 pub struct PdfOutput {
@@ -31,67 +31,103 @@ pub struct PdfOutput {
     pub title: String,
 }
 
-/// A single page ready to be appended to a PDF.
-///
-/// Decoupling the source (`DynamicImage`) from the writer lets the caller
-/// decode webp blobs, merge overlays and upscale in any order before handing
-/// the page over — without the writer needing to know about webp/layers.
-pub struct PageInput {
-    pub image: DynamicImage,
+/// Incremental PDF writer: pages are appended one at a time and the document
+/// is only saved (atomically) on [`finish`](PdfWriter::finish). Decoupling the
+/// `Document` from the page loops lets v3 parallelise decode/encode while the
+/// writer thread stays the single owner of the `Document`.
+pub struct PdfWriter<'a> {
+    doc: Document,
+    out: &'a PdfOutput,
+    count: u32,
 }
 
-impl PageInput {
-    pub fn new(image: DynamicImage) -> Self {
-        Self { image }
+impl<'a> PdfWriter<'a> {
+    pub fn new(out: &'a PdfOutput) -> Self {
+        let mut doc = Document::new();
+        doc.set_title(&out.title);
+        doc.set_author(crate::config::PDF_AUTHOR);
+        Self { doc, out, count: 0 }
     }
-}
 
-/// Build a PDF from an iterator of pages, writing it atomically.
-///
-/// `pages` is consumed lazily; each page is JPEG-encoded and embedded
-/// immediately, so peak memory is roughly one page image at a time.
-///
-/// If `pages` yields nothing, this returns `Ok(())` without creating a file
-/// rather than emitting an invalid zero-page PDF. Callers that want to treat
-/// an empty book as an error should check beforehand.
-pub fn write_pages<I>(
-    pages: I,
-    out: &PdfOutput,
-    opts: &crate::image_proc::UpscaleOpts,
-) -> Result<()>
-where
-    I: IntoIterator<Item = PageInput>,
-{
-    let mut doc = Document::new();
-    doc.set_title(&out.title);
-    doc.set_author(crate::config::PDF_AUTHOR);
+    /// Append a pre-encoded JPEG page (dimensions parsed from the header).
+    pub fn add_jpeg_page(&mut self, jpeg: &[u8]) -> Result<()> {
+        let (w, h) = match jpeg_dimensions(jpeg) {
+            Some((w, h)) => (w, h),
+            None => {
+                tracing::warn!(page = self.count + 1, "unreadable JPEG header, skipping");
+                return Ok(());
+            }
+        };
+        self.add_jpeg_with_dims(jpeg, w, h)
+    }
 
-    let mut count = 0u32;
-    for page in pages {
-        let img = upscale_image(page.image, opts);
-        let (w, h) = (img.width() as f64, img.height() as f64);
+    /// Append a pre-encoded JPEG page whose pixel dimensions are already known
+    /// (e.g. from the render worker), skipping the header parse entirely.
+    pub fn add_jpeg_with_dims(&mut self, jpeg: &[u8], width: u32, height: u32) -> Result<()> {
+        add_jpeg_page(&mut self.doc, jpeg, width as f64, height as f64)?;
+        self.count += 1;
+        self.log_progress();
+        Ok(())
+    }
 
-        let jpeg =
-            image_to_jpeg(&img).with_context(|| format!("encode page {} to JPEG", count + 1))?;
-        add_jpeg_page(&mut doc, &jpeg, w, h)?;
-        count += 1;
-
-        if count.is_multiple_of(25) {
-            tracing::debug!(pages = count, "pages written");
+    fn log_progress(&self) {
+        if self.count.is_multiple_of(25) {
+            tracing::debug!(pages = self.count, "pages written");
         }
     }
 
-    if count == 0 {
-        bail!(
-            "no pages to write for {} (refusing to emit an empty PDF)",
-            out.path.display()
-        );
+    /// Save the document atomically. Errors if no pages were added (matches
+    /// the previous behaviour of refusing to emit an empty PDF).
+    pub fn finish(mut self) -> Result<()> {
+        if self.count == 0 {
+            bail!(
+                "no pages to write for {} (refusing to emit an empty PDF)",
+                self.out.path.display()
+            );
+        }
+        save_atomic(&mut self.doc, &self.out.path)
+            .with_context(|| format!("saving PDF to {}", self.out.path.display()))?;
+        tracing::info!(pages = self.count, output = %self.out.path.display(), "PDF written");
+        Ok(())
     }
+}
 
-    save_atomic(&mut doc, &out.path)
-        .with_context(|| format!("saving PDF to {}", out.path.display()))?;
-    tracing::info!(pages = count, output = %out.path.display(), "PDF written");
-    Ok(())
+/// Parse JPEG dimensions from the SOF marker without decoding the image.
+///
+/// Returns `None` on malformed input (e.g. progressive JPEGs with a SOF2
+/// marker still carry the same header layout, so this handles all common
+/// variants).
+fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    // SOI (FF D8) → scan segments for SOF0..SOF15 (skip DHT/DAC etc.).
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 4 <= data.len() {
+        if data[i] != 0xFF {
+            return None; // lost sync
+        }
+        let marker = data[i + 1];
+        if marker == 0xD8 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 || marker == 0xC3 {
+            // SOF: height (2) width (2) after precision byte.
+            if i + 9 > data.len() {
+                return None;
+            }
+            let h = u16::from_be_bytes([data[i + 5], data[i + 6]]);
+            let w = u16::from_be_bytes([data[i + 7], data[i + 8]]);
+            return Some((w as u32, h as u32));
+        }
+        if len < 2 || i + 2 + len > data.len() {
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
 }
 
 /// Append one JPEG-encoded page to a document.
@@ -112,10 +148,11 @@ fn add_jpeg_page(doc: &mut Document, jpeg: &[u8], width: f64, height: f64) -> Re
 /// Encode any `image`-decodable image to a JPEG byte buffer.
 ///
 /// WebP and RGBA inputs are converted to RGB8 first (JPEG has no alpha channel).
-/// This is the single normalisation point used by every pipeline before asking
-/// oxidize-pdf to embed the bytes.
+/// RGB8 sources are passed through without copying. This is the single
+/// normalisation point used by every pipeline before asking oxidize-pdf to
+/// embed the bytes.
 pub fn image_to_jpeg(img: &DynamicImage) -> Result<Vec<u8>> {
-    let rgb = img.to_rgb8();
+    let rgb = to_rgb(img);
     let mut buf = Vec::with_capacity((rgb.width() as usize) * (rgb.height() as usize) / 4);
     rgb.write_to(&mut Cursor::new(&mut buf), ImageFormat::Jpeg)
         .context("JPEG encode failed")?;
@@ -156,7 +193,7 @@ pub(crate) fn page_with_overlay(
     overlay: Option<&DynamicImage>,
 ) -> DynamicImage {
     match overlay {
-        Some(layer) => DynamicImage::ImageRgb8(merge_overlay(base.to_rgb8(), layer)),
+        Some(layer) => DynamicImage::ImageRgb8(merge_overlay(to_rgb(&base), layer)),
         None => base,
     }
 }

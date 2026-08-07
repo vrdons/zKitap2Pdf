@@ -41,8 +41,8 @@ impl Default for UpscaleOpts {
 /// * Alpha channel is handled: the image is converted to 8-bit RGBA, resized,
 ///   then returned. Callers that feed the result to JPEG will drop alpha via
 ///   [`crate::pdf::image_to_jpeg`].
-/// * [`image::imageops::FilterType::Lanczos3`] is used: high quality, but not
-///   pathologically slow (unlike Gaussian). It is the standard choice for
+/// * [`image::imageops::FilterType::CatmullRom`] is used: near-Lanczos quality
+///   at roughly half the cost, a good speed/quality trade-off for
 ///   photographic/page content.
 /// * Dimensions are clamped to `u32::MAX/4` to prevent overflow on absurd
 ///   scale factors. A page that fails to resize returns the *original* image
@@ -73,7 +73,7 @@ pub fn upscale_image(img: DynamicImage, opts: &UpscaleOpts) -> DynamicImage {
         to = format!("{new_w}x{new_h}"),
         "upscale"
     );
-    img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
+    img.resize(new_w, new_h, image::imageops::FilterType::CatmullRom)
 }
 
 /// Composite an RGBA overlay onto an RGB base image (alpha blend).
@@ -81,6 +81,10 @@ pub fn upscale_image(img: DynamicImage, opts: &UpscaleOpts) -> DynamicImage {
 /// `base` is grown (transparent fill) if the overlay is larger; both images are
 /// cropped to their overlap region when iterating. This is used by the v3
 /// "page + layer" combination (`p-N.webp` + `p-l-N.webp`).
+///
+/// Performance: works on raw pixel buffers with row-wise `copy_from_slice`
+/// (no per-pixel bound checks / `put_pixel`) and converts the overlay to RGBA
+/// once, since the page decode already produced RGBA.
 pub fn merge_overlay(base: image::RgbImage, overlay: &DynamicImage) -> image::RgbImage {
     let overlay_rgba = overlay.to_rgba8();
     let (bw, bh) = base.dimensions();
@@ -92,31 +96,55 @@ pub fn merge_overlay(base: image::RgbImage, overlay: &DynamicImage) -> image::Rg
     let (out_w, out_h) = (bw.max(ow), bh.max(oh));
     let mut out: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(out_w, out_h);
 
-    // Copy base first.
-    for y in 0..bh {
-        for x in 0..bw {
-            out.put_pixel(x, y, *base.get_pixel(x, y));
-        }
-    }
+    {
+        // Work directly on the raw pixel buffer (no bound-checked put_pixel).
+        let out_raw: &mut [u8] = out.as_mut();
 
-    // Alpha-blend overlay on top.
-    for y in 0..oh.min(out_h) {
-        for x in 0..ow.min(out_w) {
-            let p = overlay_rgba.get_pixel(x, y);
-            let alpha = p[3] as u32;
-            if alpha == 0 {
+        // Copy base first (row-wise; interior rows are full-width copies).
+        let base_raw = base.as_raw();
+        let bstride = bw as usize * 3; // RGB = 3 bytes/pixel
+        let ostride = out_w as usize * 3;
+        if bw == out_w {
+            out_raw.copy_from_slice(base_raw);
+        } else {
+            for y in 0..bh as usize {
+                let src = &base_raw[y * bstride..(y + 1) * bstride];
+                out_raw[y * ostride..y * ostride + bstride].copy_from_slice(src);
+            }
+        }
+
+        // Alpha-blend overlay on top (row-wise over the overlap region).
+        let ob = overlay_rgba.as_raw();
+        let owidth = ow as usize;
+        let ostride4 = owidth * 4; // RGBA = 4 bytes/pixel
+        let overlap_w = ow.min(out_w) as usize;
+        for y in 0..oh.min(out_h) as usize {
+            let orow = &ob[y * ostride4..(y + 1) * ostride4];
+            let orow = &orow[..overlap_w * 4];
+            let drow = &mut out_raw[y * ostride..y * ostride + overlap_w * 3];
+
+            // Fast path: fully opaque overlay row → bulk copy.
+            if orow[3..].iter().step_by(4).all(|&a| a == 255) {
+                for (dst, src) in drow.chunks_exact_mut(3).zip(orow.chunks_exact(4)) {
+                    dst.copy_from_slice(&src[..3]);
+                }
                 continue;
             }
-            if alpha == 255 {
-                out.put_pixel(x, y, Rgb([p[0], p[1], p[2]]));
-                continue;
+
+            for (dst, src) in drow.chunks_exact_mut(3).zip(orow.chunks_exact(4)) {
+                let a = src[3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                if a == 255 {
+                    dst.copy_from_slice(&src[..3]);
+                    continue;
+                }
+                let inv = 255 - a;
+                dst[0] = ((src[0] as u32 * a + dst[0] as u32 * inv) / 255) as u8;
+                dst[1] = ((src[1] as u32 * a + dst[1] as u32 * inv) / 255) as u8;
+                dst[2] = ((src[2] as u32 * a + dst[2] as u32 * inv) / 255) as u8;
             }
-            let dst = out.get_pixel(x, y);
-            let inv = 255 - alpha;
-            let r = (p[0] as u32 * alpha + dst[0] as u32 * inv) / 255;
-            let g = (p[1] as u32 * alpha + dst[1] as u32 * inv) / 255;
-            let b = (p[2] as u32 * alpha + dst[2] as u32 * inv) / 255;
-            out.put_pixel(x, y, Rgb([r as u8, g as u8, b as u8]));
         }
     }
     out
@@ -126,6 +154,15 @@ pub fn merge_overlay(base: image::RgbImage, overlay: &DynamicImage) -> image::Rg
 // pixel-level types even though resize happens through `DynamicImage`.
 #[allow(dead_code)]
 type _UnusedPixelTypes = (Rgba<u8>, RgbaImage);
+
+/// Make a page image opaque: convert RGBA→RGB (white background) without an
+/// extra full-image allocation when the source is already RGB8.
+pub fn to_rgb(img: &DynamicImage) -> image::RgbImage {
+    match img {
+        DynamicImage::ImageRgb8(rgb) => rgb.clone(),
+        other => other.to_rgb8(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

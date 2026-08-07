@@ -20,11 +20,16 @@ use std::{
 pub struct ExporterOpt {
     pub graphics: GraphicsBackend,
     pub scale: f64,
+    /// Approximate memory budget (MiB) for in-flight rendered frames.
+    /// `0` = unbounded (default channel sizes). Bounds the capture/JPEG
+    /// queues so low-memory machines don't pile up big RGBA/JPEG buffers.
+    pub max_mem: usize,
 }
 
 pub struct Exporter {
     descriptors: Arc<Descriptors>,
     scale: f64,
+    max_mem: usize,
 }
 
 /// One ready-to-embed page frame, already JPEG-encoded by the render worker so
@@ -37,6 +42,10 @@ pub struct RenderedPage {
     pub frame: u16,
     /// JPEG-encoded image bytes (DCT stream), directly embeddable by oxidize-pdf.
     pub jpeg: Vec<u8>,
+    /// Exact pixel dimensions of the rendered frame (pre-encoded by the
+    /// worker) — avoids parsing the JPEG header in the PDF writer.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A single job for the persistent render worker.
@@ -50,16 +59,19 @@ pub struct RenderJob {
 pub struct Worker {
     handle: thread::JoinHandle<()>,
     job_tx: mpsc::SyncSender<RenderJob>,
+    max_mem: usize,
 }
 
 impl Worker {
     /// Queue a SWF for rendering. Returns the per-job receiver that yields
     /// JPEG-encoded pages in order.  Blocks only if the worker's queue is full.
     pub fn send_job(&self, path: PathBuf) -> Result<mpsc::Receiver<Result<RenderedPage>>> {
-        // A bounded per-job channel (4) provides mild back-pressure so a book
-        // with hundreds of pages doesn't queue every encoded JPEG in RAM before
-        // the PDF writer drains it.
-        let (tx, rx) = mpsc::sync_channel(4);
+        // A bounded per-job channel provides mild back-pressure so a book with
+        // hundreds of pages doesn't queue every encoded JPEG in RAM before the
+        // PDF writer drains it. With `--max-mem` the queue shrinks further to
+        // keep in-flight JPEG bytes low on constrained machines.
+        let queue_len = if self.max_mem > 0 { 2 } else { 4 };
+        let (tx, rx) = mpsc::sync_channel(queue_len);
         self.job_tx
             .send(RenderJob { path, tx })
             .map_err(|_| anyhow!("render worker has died"))?;
@@ -92,6 +104,7 @@ impl Exporter {
         Ok(Self {
             descriptors: Arc::new(Descriptors::new(instance, adapter, device, queue)),
             scale: opt.scale,
+            max_mem: opt.max_mem,
         })
     }
 
@@ -99,17 +112,24 @@ impl Exporter {
     /// jobs are sent through the returned [`Worker`] so the GLES context is
     /// never shared across threads.
     pub fn spawn_worker(&self) -> Worker {
+        // The job queue holds *paths* (tiny), so it can stay generous; the
+        // per-job page queues are where big buffers accumulate.
         let (job_tx, job_rx) = mpsc::sync_channel::<RenderJob>(8);
         let descriptors = self.descriptors.clone();
         let scale = self.scale;
+        let max_mem = self.max_mem;
 
         let handle = thread::spawn(move || {
             for job in job_rx {
-                render_frames(descriptors.clone(), scale, &job.path, job.tx);
+                render_frames(descriptors.clone(), scale, max_mem, &job.path, job.tx);
             }
         });
 
-        Worker { handle, job_tx }
+        Worker {
+            handle,
+            job_tx,
+            max_mem: self.max_mem,
+        }
     }
 }
 
@@ -118,11 +138,17 @@ impl Exporter {
 fn render_frames(
     descriptors: Arc<Descriptors>,
     scale: f64,
+    max_mem: usize,
     path: &Path,
     tx: mpsc::SyncSender<Result<RenderedPage>>,
 ) {
-    let send_err = |frame: u16, msg: &str| {
-        let _ = tx.send(Err(anyhow!("frame {frame}: {msg}")));
+    // Clone the sender so the encoder thread can move its own copy while the
+    // render loop keeps using `tx` for error reporting.
+    let send_err = {
+        let tx = tx.clone();
+        move |frame: u16, msg: &str| {
+            let _ = tx.send(Err(anyhow!("frame {frame}: {msg}")));
+        }
     };
 
     let movie = match movie_from_path(path, None) {
@@ -161,6 +187,55 @@ fn render_frames(
 
     tracing::info!(total_frames, %width, %height, "capturing frames");
 
+    // Pipeline: the render loop pushes raw RGBA captures into a bounded queue,
+    // a dedicated encoder thread converts them to JPEG and forwards them in
+    // order. GPU render and CPU encode overlap, so the second core stays busy
+    // instead of idling while the worker serialises encode after render.
+    // With `--max-mem` the capture queue shrinks to 1, bounding how many
+    // uncompressed RGBA buffers can be in flight (~W×H×4 bytes each).
+    let cap_queue = if max_mem > 0 { 1 } else { 2 };
+    let (cap_tx, cap_rx) = mpsc::sync_channel::<Result<(u16, RgbaImage)>>(cap_queue);
+
+    let encode_handle = thread::spawn(move || {
+        for item in cap_rx {
+            match item {
+                Ok((frame, rgba)) => {
+                    let (w, h) = (rgba.width(), rgba.height());
+                    match encode_jpeg(&rgba) {
+                        Ok(jpeg) => {
+                            if tx
+                                .send(Ok(RenderedPage {
+                                    frame,
+                                    jpeg,
+                                    width: w,
+                                    height: h,
+                                }))
+                                .is_err()
+                            {
+                                break; // consumer dropped
+                            }
+                            if (frame + 1) % 25 == 0 {
+                                tracing::info!(
+                                    page = frame + 1,
+                                    total = total_frames,
+                                    "captured"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(anyhow!("frame {frame}: jpeg encode: {e}")));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if tx.send(Err(e)).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     for i in 0..total_frames {
         tracing::trace!(frame = i + 1, total = total_frames, "running frame");
         let capture_attempt = {
@@ -168,7 +243,7 @@ fn render_frames(
                 Ok(pl) => pl,
                 Err(e) => {
                     send_err(i, &format!("mutex poisoned: {e}"));
-                    return;
+                    break;
                 }
             };
             locked_player.preload(&mut ExecutionLimit::none());
@@ -186,19 +261,11 @@ fn render_frames(
 
         match capture_attempt {
             Ok(Ok(Some(rgba))) => {
-                // Encode to JPEG *on the render worker* so the consumer thread
-                // only deals with compact DCT bytes — no big RGBA buffers
-                // crossing the channel and no disk spill.
-                match encode_jpeg(&rgba) {
-                    Ok(jpeg) => {
-                        if tx.send(Ok(RenderedPage { frame: i, jpeg })).is_err() {
-                            break; // consumer dropped
-                        }
-                        if (i + 1) % 25 == 0 || i + 1 == total_frames {
-                            tracing::info!(page = i + 1, total = total_frames, "captured");
-                        }
-                    }
-                    Err(e) => send_err(i, &format!("jpeg encode: {e}")),
+                // Hand off to the encoder thread. A full queue means the
+                // encoder is still busy — back-pressure is fine, it just
+                // synchronises the pipeline briefly.
+                if cap_tx.send(Ok((i, rgba))).is_err() {
+                    break; // encoder died
                 }
             }
             Ok(Ok(None)) => {
@@ -212,12 +279,17 @@ fn render_frames(
             }
         }
     }
+
+    // Signal EOF to the encoder and wait for it to drain remaining frames.
+    drop(cap_tx);
+    let _ = encode_handle.join();
 }
 
 /// In-memory JPEG encoding of a captured RGBA frame.
 ///
-/// Runs on the render worker thread, keeping the (relatively expensive) pixel
-/// → DCT conversion off the PDF-writer thread and avoiding any disk I/O.
+/// Runs on a dedicated encoder thread, keeping the (relatively expensive)
+/// pixel → DCT conversion off both the GPU render loop and the PDF-writer
+/// thread.
 fn encode_jpeg(rgba: &RgbaImage) -> Result<Vec<u8>> {
     let rgb = image::DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
     let mut buf = Vec::with_capacity((rgb.width() as usize) * (rgb.height() as usize) / 4);

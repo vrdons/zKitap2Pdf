@@ -6,18 +6,16 @@
 //!   1. queue jobs grouped by SWF (sysb content first, then masks),
 //!   2. forward each page to the shared PDF writer in [`crate::pdf`].
 //!
-//! Crucially there is **no disk round-trip**: the previous implementation wrote
-//! every page to a temp JPEG file and re-read it for oxidize-pdf. That doubled
-//! I/O and forced a temp dir lifetime to bracket the whole run.
+//! Crucially there is **no disk round-trip and no decode/re-encode round-trip**:
+//! the worker's JPEG bytes are embedded directly (upscaling already happened
+//! at capture time via Ruffle's viewport scale).
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use image::DynamicImage;
 
 use crate::cli::Files;
-use crate::image_proc::UpscaleOpts;
-use crate::pdf::{PageInput, PdfOutput, write_pages};
+use crate::pdf::PdfOutput;
 use crate::ruffle::exporter::{Exporter, RenderedPage};
 
 /// Metadata for a single patched SWF ready to render.
@@ -37,13 +35,12 @@ pub struct SwfInput {
 /// Because Ruffle/WGPU owns a GPU context that cannot be shared across threads,
 /// all rendering happens on one worker. Throughput is improved instead by doing
 /// the JPEG encoding on that same worker (see [`crate::ruffle::exporter`]) and
-/// by writing the PDF incrementally via [`crate::pdf::write_pages`].
-pub fn render(
-    exporter: &Exporter,
-    swf_inputs: &[SwfInput],
-    file_info: &Files,
-    upscale: &UpscaleOpts,
-) -> Result<()> {
+/// by writing the PDF incrementally via [`crate::pdf::PdfWriter`].
+///
+/// Note: the upscale stage is deliberately *not* applied here — Ruffle already
+/// renders at the configured scale (`--scale`), so a second upscale in the PDF
+/// writer would double the size (3.24× instead of 1.8×) for zero quality gain.
+pub fn render(exporter: &Exporter, swf_inputs: &[SwfInput], file_info: &Files) -> Result<()> {
     let worker = exporter.spawn_worker();
 
     // Queue every SWF up-front; the worker processes them one at a time on its
@@ -63,7 +60,6 @@ pub fn render(
         .collect::<Result<Vec<_>>>()?;
 
     let total_swf = swf_inputs.len();
-    let mut total_pages = 0u32;
     let pages = PageStream {
         receivers: job_rx_list,
         swf_names: swf_inputs.iter().map(|s| s.name.clone()).collect(),
@@ -76,20 +72,22 @@ pub fn render(
         path: file_info.output.clone(),
         title: file_info.filename.clone(),
     };
-    write_pages(
-        pages.filter_map(|res| match res {
+    let mut writer = crate::pdf::PdfWriter::new(&out);
+    let mut total_pages = 0u32;
+    for res in pages {
+        match res {
             Ok(page) => {
                 total_pages += 1;
-                Some(PageInput::new(decode_jpeg_as_image(&page.jpeg)))
+                // Dimensions are known from the worker — skip the JPEG header
+                // parse in the PDF writer.
+                writer.add_jpeg_with_dims(&page.jpeg, page.width, page.height)?;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "frame dropped");
-                None
             }
-        }),
-        &out,
-        upscale,
-    )?;
+        }
+    }
+    writer.finish()?;
 
     // Shut down the worker (job_tx is dropped → worker loop ends). A join
     // error is only logged, not fatal — the PDF is already fully written.
@@ -99,23 +97,6 @@ pub fn render(
 
     tracing::info!(pages = total_pages, "render PDF finished");
     Ok(())
-}
-
-/// Decode the JPEG bytes produced by the render worker back into a
-/// `DynamicImage` for the shared `pdf` module (which re-embeds JPEG).
-///
-/// This round-trip exists only because `pdf.rs` works on `DynamicImage` to stay
-/// uniform across the v1/v2/v3 paths. The cost is small relative to the GPU
-/// render; a single decode failure yields a 1×1 blank page rather than aborting
-/// the whole multi-hundred-page book.
-fn decode_jpeg_as_image(jpeg: &[u8]) -> DynamicImage {
-    match image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg) {
-        Ok(img) => img,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to re-decode worker JPEG; emitting blank");
-            DynamicImage::ImageRgb8(image::RgbImage::new(1, 1))
-        }
-    }
 }
 
 /// Lazy iterator over [`RenderedPage`]s produced by the worker, advancing

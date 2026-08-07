@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use image::DynamicImage;
+use rayon::prelude::*;
 use tempfile::TempDir;
 
 use crate::cli::Files;
@@ -30,26 +31,50 @@ use crate::fernus::crypto::{DEFAULT_KRY_CODE, DEFAULT_PUBLISHER_KEY, KK, KryCode
 use crate::fernus::frns::{self, DecryptedFrame};
 use crate::fernus::v3;
 use crate::image_proc::UpscaleOpts;
-use crate::pdf::{PageInput, PdfOutput, page_with_overlay, write_pages};
+use crate::pdf::{PdfOutput, PdfWriter, page_with_overlay};
 use crate::ruffle::exporter::Exporter;
 use crate::ruffle::render::{SwfInput, render as render_pdf};
 use crate::ruffle::swf;
 use crate::utils::{self, process, watcher};
 
 /// Process one EXE end-to-end. Auto-detects v1/v2 vs v3 format.
-pub fn handle_exe(exporter: &Exporter, file: &Files, upscale: &UpscaleOpts) -> Result<()> {
+///
+/// `cores` is the user-configured parallelism cap (`--cores`): it bounds the
+/// v3 page chunk size so memory stays reasonable on big machines while the
+/// rayon pool does the actual work. `max_mem` (MiB) further caps the chunk by
+/// a memory budget (`--max-mem`, `0` = unbounded).
+pub fn handle_exe(
+    exporter: &Exporter,
+    file: &Files,
+    upscale: &UpscaleOpts,
+    cores: usize,
+    max_mem: usize,
+) -> Result<()> {
     if utils::has_enigma(&file.input) {
         tracing::info!("v3 format detected (Enigma + Flutter)");
-        return handle_v3(file, upscale);
+        return handle_v3(file, upscale, cores, max_mem);
     }
 
-    let _child = process::execute_exe(&file.input)?;
+    let mut child = process::execute_exe(&file.input)?;
 
     let temp_path = process::temp_path()?;
     tracing::debug!(temp = %temp_path.display(), "watching %TEMP%");
 
     let payloads = watcher::watch_and_collect(&temp_path)?;
     tracing::debug!(count = payloads.len(), keys = ?payloads.keys().collect::<Vec<_>>(), "collected");
+
+    // The projector has dropped everything we need — reap it now. Leaving the
+    // Wine process (and its wineserver) running would burn CPU in the
+    // background, and in batch mode would let processes pile up.
+    match child.try_wait() {
+        Ok(Some(status)) => tracing::debug!(code = status.code(), "projector exited"),
+        Ok(None) => {
+            tracing::info!("killing projector (payload collected)");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Err(e) => tracing::warn!(error = %e, "waiting for projector failed"),
+    }
 
     if payloads.is_empty() {
         return Err(anyhow!("No payload files found in Temp"));
@@ -114,11 +139,11 @@ pub fn handle_exe(exporter: &Exporter, file: &Files, upscale: &UpscaleOpts) -> R
     }
 
     swf_inputs.sort_by_key(|input| !input.name.contains("sysb"));
-    render_pdf(exporter, &swf_inputs, file, upscale)
+    render_pdf(exporter, &swf_inputs, file)
 }
 
 /// Process a v3 Flutter + Enigma EXE.
-fn handle_v3(file: &Files, upscale: &UpscaleOpts) -> Result<()> {
+fn handle_v3(file: &Files, upscale: &UpscaleOpts, cores: usize, max_mem: usize) -> Result<()> {
     // Step 1: Unpack Enigma VFS
     tracing::info!("[1/6] Unpacking Enigma VFS...");
     let extracted = evbunpack_rs::enigma::unpack(&file.input).context("Enigma unpack failed")?;
@@ -215,7 +240,7 @@ fn handle_v3(file: &Files, upscale: &UpscaleOpts) -> Result<()> {
 
     // Step 6: webp → PDF (with optional upscale + layer overlay)
     tracing::info!("[6/6] Converting webp → PDF...");
-    write_v3_pdf(file, &assets, upscale)?;
+    write_v3_pdf(file, &assets, upscale, cores, max_mem)?;
     Ok(())
 }
 
@@ -239,63 +264,70 @@ fn collect_v3_webp(
     let mut pages: Vec<(usize, Vec<u8>)> = Vec::new();
     let mut layers: HashMap<usize, Vec<u8>> = HashMap::new();
 
-    for f in extracted {
-        let path = &f.path;
-        let fn_lower = path.to_lowercase();
-        if !fn_lower.ends_with(".webp") {
-            continue;
-        }
+    // Decryption is stateless per file, so it parallelises trivially. Each
+    // matching file is reduced into a `(category, page_num, data)` tuple and
+    // folded into the output collections afterwards.
+    extracted
+        .par_iter()
+        .filter_map(|f| {
+            let path = &f.path;
+            let fn_lower = path.to_lowercase();
+            if !fn_lower.ends_with(".webp") {
+                return None;
+            }
 
-        // Extract filename from path.
-        let name = Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        let name_lower = name.to_lowercase();
+            // Extract filename from path.
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let name_lower = name.to_lowercase();
 
-        // Thumbnails (t-*.webp) are unencrypted and unused by the PDF, skip them.
-        if name_lower.starts_with("t-") {
-            continue;
-        }
+            // Thumbnails (t-*.webp) are unencrypted and unused by the PDF, skip them.
+            if name_lower.starts_with("t-") {
+                return None;
+            }
 
-        // Try AES decrypt; fall back to plaintext if it already has a RIFF header.
-        let dec = match v3::decrypt_bytes(&f.data, book_key, iv) {
-            Ok(d) => d,
-            Err(_) => {
-                if f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
-                    f.data.clone()
-                } else {
-                    tracing::warn!(path = %path, "decrypt failed, skipping");
-                    continue;
+            // Try AES decrypt; fall back to plaintext if it already has a RIFF header.
+            let dec = match v3::decrypt_bytes(&f.data, book_key, iv) {
+                Ok(d) => d,
+                Err(_) => {
+                    if f.data.len() >= 4 && &f.data[..4] == b"RIFF" {
+                        f.data.clone()
+                    } else {
+                        tracing::warn!(path = %path, "decrypt failed, skipping");
+                        return None;
+                    }
                 }
+            };
+
+            // Validate that the decrypted payload actually looks like webp — a bad
+            // key/IV yields garbage that would panic the image decoder later.
+            if dec.len() < 12 || &dec[..4] != b"RIFF" || &dec[8..12] != b"WEBP" {
+                tracing::warn!(path = %path, "decrypted data is not a valid WebP, skipping");
+                return None;
             }
-        };
 
-        // Validate that the decrypted payload actually looks like webp — a bad
-        // key/IV yields garbage that would panic the image decoder later.
-        if dec.len() < 12 || &dec[..4] != b"RIFF" || &dec[8..12] != b"WEBP" {
-            tracing::warn!(path = %path, "decrypted data is not a valid WebP, skipping");
-            continue;
-        }
+            // p-l-N.webp = overlay layer for page N; p-N.webp = page content.
+            if let Some(stripped) = name_lower.strip_prefix("p-l-") {
+                return parse_page_num_suffix(stripped).map(|num| (1, num, dec));
+            }
+            if let Some(stripped) = name_lower.strip_prefix("p-") {
+                return parse_page_num_suffix(stripped).map(|num| (0, num, dec));
+            }
 
-        // p-l-N.webp = overlay layer for page N
-        if let Some(stripped) = name_lower.strip_prefix("p-l-") {
-            if let Some(num) = parse_page_num_suffix(stripped) {
+            tracing::debug!(path = %path, "unknown webp, skipped");
+            None
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .for_each(|(is_layer, num, dec)| {
+            if is_layer == 1 {
                 layers.insert(num, dec);
-            }
-            continue;
-        }
-
-        // p-N.webp = page N (content)
-        if let Some(stripped) = name_lower.strip_prefix("p-") {
-            if let Some(num) = parse_page_num_suffix(stripped) {
+            } else {
                 pages.push((num, dec));
             }
-            continue;
-        }
-
-        tracing::debug!(path = %path, "unknown webp, skipped");
-    }
+        });
 
     // Sort pages by their real page number to guarantee natural reading order.
     pages.sort_by_key(|(n, _)| *n);
@@ -328,49 +360,104 @@ fn decode_webp(bytes: &[u8], what: &str) -> Result<DynamicImage> {
         .with_context(|| format!("decode webp {what}"))
 }
 
+/// Number of pages processed per parallel chunk in the v3 path.
+///
+/// Memory is the constraint: a 1.8×-upscaled ~4K page can exceed 300 MB while
+/// working. We chunk so that at most `cores` pages are decoded/upscaled at
+/// once, with a hard cap of 8 to keep peak RSS reasonable even on big
+/// machines. `cores == 0` means "auto" → the rayon pool size.
+///
+/// When `max_mem` (MiB) is given, the chunk is additionally bounded so that
+/// `chunk_size * PAGE_WORKING_SET ≈ max_mem`, i.e. the memory budget directly
+/// controls how many pages can be in flight at once.
+fn v3_chunk_size(cores: usize, max_mem: usize) -> usize {
+    const HARD_CAP: usize = 8;
+    /// Rough working set of one page in flight (decode RGBA + upscaled RGB +
+    /// JPEG buffer), conservatively ~300 MiB at 1.8× for ~4K pages.
+    const PAGE_WORKING_SET_MIB: usize = 300;
+
+    let by_cores = if cores == 0 {
+        rayon::current_num_threads()
+    } else {
+        cores.max(1)
+    };
+
+    if max_mem > 0 {
+        let by_mem = (max_mem / PAGE_WORKING_SET_MIB).max(1);
+        by_cores.min(by_mem).min(HARD_CAP)
+    } else {
+        by_cores.min(HARD_CAP)
+    }
+}
+
 /// Build the PDF from v3 webp pages, applying optional upscale and overlay.
 ///
-/// Pages are streamed one at a time through [`crate::pdf::write_pages`], so a
-/// 500-page book never holds 500 decoded images in RAM at once.
-fn write_v3_pdf(file: &Files, assets: &V3Assets, upscale: &UpscaleOpts) -> Result<()> {
-    let layers = &assets.layers;
-    let pages = assets.pages.iter().map(|(num, data)| {
-        let res: Result<PageInput> = (|| {
-            let base = decode_webp(data, &format!("page {num}"))?;
-            let overlay = match layers.get(num) {
-                Some(l) => match decode_webp(l, &format!("layer {num}")) {
-                    Ok(img) => {
-                        tracing::info!(page = num, "converted");
-                        Some(img)
-                    }
-                    Err(e) => {
-                        // A broken layer must not kill the page; warn and skip.
-                        tracing::warn!(page = num, error = %e, "overlay decode failed");
-                        None
-                    }
-                },
-                None => None,
-            };
-            Ok(PageInput::new(page_with_overlay(base, overlay.as_ref())))
-        })();
-        res
-    });
-
+/// Decode/merge/upscale/encode are embarrassingly parallel per page, so they
+/// run on a rayon pool while the PDF `Document` is written strictly in page
+/// order on the calling thread. Workers process small chunks at a time, which
+/// keeps peak memory bounded (decode + upscale of a handful of pages, never
+/// the whole book).
+///
+/// `cores` caps the per-chunk parallelism; `max_mem` (MiB) optionally bounds
+/// the chunk by a memory budget. `0` for either means "auto" (rayon pool size
+/// for cores; unbounded for memory).
+fn write_v3_pdf(
+    file: &Files,
+    assets: &V3Assets,
+    upscale: &UpscaleOpts,
+    cores: usize,
+    max_mem: usize,
+) -> Result<()> {
     let out = PdfOutput {
         path: file.output.clone(),
         title: file.filename.clone(),
     };
-    write_pages(
-        pages.filter_map(|r| match r {
-            Ok(p) => Some(p),
-            Err(e) => {
-                tracing::warn!(error = %e, "page dropped");
-                None
+    let mut writer = PdfWriter::new(&out);
+
+    let chunk_size = v3_chunk_size(cores, max_mem);
+    let layers = &assets.layers;
+    // `par_chunks` yields parallel chunks; collect them (cheap slice refs) so
+    // we can process each chunk's pages in parallel and embed serially.
+    let chunks: Vec<_> = assets.pages.par_chunks(chunk_size).collect();
+    for chunk in chunks {
+        // Parallel stage: decode base + overlay, merge, upscale, JPEG-encode.
+        // Failures are collected per page so one corrupt page cannot abort the
+        // whole book (the writer only sees `Ok` entries).
+        let jpegs: Vec<anyhow::Result<Vec<u8>>> = chunk
+            .par_iter()
+            .map(|(num, data)| {
+                (|| -> Result<Vec<u8>> {
+                    let base = decode_webp(data, &format!("page {num}"))?;
+                    let overlay = match layers.get(num) {
+                        Some(l) => match decode_webp(l, &format!("layer {num}")) {
+                            Ok(img) => Some(img),
+                            Err(e) => {
+                                // A broken layer must not kill the page; warn and skip.
+                                tracing::warn!(page = num, error = %e, "overlay decode failed");
+                                None
+                            }
+                        },
+                        None => None,
+                    };
+                    let img = page_with_overlay(base, overlay.as_ref());
+                    let img = crate::image_proc::upscale_image(img, upscale);
+                    let (w, h) = (img.width(), img.height());
+                    let jpeg = crate::pdf::image_to_jpeg(&img)?;
+                    tracing::info!(page = num, dims = format!("{w}x{h}"), "converted");
+                    Ok(jpeg)
+                })()
+            })
+            .collect();
+
+        // Serial stage: embed in page order.
+        for (num, res) in chunk.iter().zip(jpegs) {
+            match res {
+                Ok(jpeg) => writer.add_jpeg_page(&jpeg)?,
+                Err(e) => tracing::warn!(page = num.0, error = %e, "page dropped"),
             }
-        }),
-        &out,
-        upscale,
-    )
+        }
+    }
+    writer.finish()
 }
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,16 @@ pub struct Args {
     #[arg(long, short, default_value = "default")]
     pub graphics: GraphicsBackend,
 
+    /// Number of CPU cores to use for parallel page processing.
+    /// `0` (default) = auto-detect (all available cores).
+    #[arg(long, default_value_t = 0)]
+    pub cores: usize,
+
+    /// Approximate memory budget (MiB) for in-flight pages.
+    /// `0` (default) = unbounded (chunk size = core count, capped at 8).
+    #[arg(long, default_value_t = 0)]
+    pub max_mem: usize,
+
     /// Enable verbose output (debug-level logs).
     #[arg(long)]
     pub debug: bool,
@@ -50,6 +60,8 @@ pub struct ValidatedArgs {
     pub files: Vec<Files>,
     pub scale: f64,
     pub graphics: GraphicsBackend,
+    pub cores: usize,
+    pub max_mem: usize,
 }
 
 impl Args {
@@ -75,6 +87,8 @@ impl Args {
             files,
             scale: self.scale,
             graphics: self.graphics,
+            cores: self.cores,
+            max_mem: self.max_mem,
         })
     }
 
