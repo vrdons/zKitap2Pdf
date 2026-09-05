@@ -29,7 +29,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
 swf = { git = "https://github.com/ruffle-rs/ruffle.git", package = "swf", rev = "118fd452bb4dac887fa7c8dfc3d6c3335b330fa9" }
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_core", features = ["deterministic", "default_font"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
-ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render_wgpu", features = ["clap"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
+ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render_wgpu", features = ["clap"], rev = "93ce5a12c458235bf1ef8644e6ee49fb60755dd8" }
 ruffle_render = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render", rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
 futures = "0.3.32"
 oxidize-pdf = "4.0.0"
