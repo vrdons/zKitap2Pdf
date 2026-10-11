@@ -32,7 +32,7 @@ ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruff
 ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render_wgpu", features = ["clap"], rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
 ruffle_render = { git = "https://github.com/ruffle-rs/ruffle.git", package = "ruffle_render", rev = "a1ac4ce8647352ad03044031cad0454a636427b8" }
 futures = "0.3.32"
-oxidize-pdf = "4.0.0"
+oxidize-pdf = "5.0.0"
 tempfile = "3.25.0"
 base64 = "0.23.0"
 hex = "0.4.3"
